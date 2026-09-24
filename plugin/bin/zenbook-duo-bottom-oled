@@ -1,0 +1,217 @@
+#!/usr/bin/env bash
+# Toggle the ASUS Zenbook Duo bottom OLED (eDP-2) for Omarchy/Hyprland.
+#
+# Default: OFF. Operator must explicitly turn it ON.
+# Folio/keyboard attach is NOT a hide path (stock Omarchy does not hide eDP-2).
+# Persist via Omarchy hypr toggle Lua (sourced at compositor load) — no extra
+# process, no udev, no second compositor when the panel is off.
+#
+# SKU labels: UX8406CA (Lunar Lake) vs UX8406MA vs generic.
+
+set -euo pipefail
+
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/omarchy"
+STATE_FILE="$STATE_DIR/zenbook-duo-bottom-oled"
+TOGGLE_DIR="$STATE_DIR/toggles/hypr"
+DISABLE_FILE="$TOGGLE_DIR/zenbook-duo-bottom-oled-disable.lua"
+ENABLE_FILE="$TOGGLE_DIR/zenbook-duo-bottom-oled-enable.lua"
+
+usage() {
+  cat <<'EOF'
+Usage: zenbook-duo-bottom-oled <off|on|toggle|status|apply>
+
+  off      Disable bottom OLED (eDP-2). This is the default.
+  on       Enable bottom OLED below the top panel (operator toggle).
+  toggle   Flip desired state.
+  status   Print SKU, outputs, desired/live state.
+  apply    Re-apply desired state (missing state file => off).
+
+EOF
+}
+
+sku_info() {
+  local product="" board=""
+  product=$(tr -d '\0' </sys/class/dmi/id/product_name 2>/dev/null || true)
+  board=$(tr -d '\0' </sys/class/dmi/id/board_name 2>/dev/null || true)
+
+  if [[ $product == *UX8406CA* || $board == *UX8406CA* ]]; then
+    SKU="UX8406CA"
+    SKU_CLASS="CA"
+    SKU_NOTE="Lunar Lake, Arc 140V-class"
+  elif [[ $product == *UX8406MA* || $board == *UX8406MA* ]]; then
+    SKU="UX8406MA"
+    SKU_CLASS="MA"
+    SKU_NOTE="Meteor Lake — not the target SKU"
+  else
+    SKU="generic"
+    SKU_CLASS="generic"
+    SKU_NOTE="not UX8406CA / UX8406MA"
+  fi
+
+  DMI_PRODUCT="$product"
+  DMI_BOARD="$board"
+}
+
+safe_connector() {
+  [[ $1 =~ ^[A-Za-z0-9._-]+$ ]]
+}
+
+load_outputs() {
+  local json
+  json=$(hyprctl monitors all -j) || {
+    echo "hyprctl monitors failed" >&2
+    exit 1
+  }
+
+  mapfile -t EDPS < <(jq -r '.[] | select(.name | test("^(eDP|LVDS|DSI)-")) | .name' <<<"$json" | sort)
+
+  TOP="${EDPS[0]:-}"
+  BOTTOM="${EDPS[1]:-}"
+
+  # Prefer the conventional Duo name when present.
+  if jq -e '.[] | select(.name == "eDP-2")' <<<"$json" >/dev/null; then
+    BOTTOM="eDP-2"
+  fi
+  if jq -e '.[] | select(.name == "eDP-1")' <<<"$json" >/dev/null; then
+    TOP="eDP-1"
+  fi
+
+  if [[ -z $BOTTOM || $BOTTOM == "$TOP" ]]; then
+    echo "No bottom OLED found (need two internal panels). SKU=${SKU} (${SKU_CLASS})." >&2
+    exit 1
+  fi
+  if ! safe_connector "$BOTTOM" || ! safe_connector "$TOP"; then
+    echo "Refusing unsafe monitor name (top=$TOP bottom=$BOTTOM)" >&2
+    exit 1
+  fi
+
+  BOTTOM_DISABLED=$(jq -r --arg n "$BOTTOM" '.[] | select(.name == $n) | .disabled' <<<"$json")
+  TOP_SCALE=$(jq -r --arg n "$TOP" '.[] | select(.name == $n) | .scale' <<<"$json")
+}
+
+desired_state() {
+  if [[ -f $STATE_FILE ]]; then
+    tr -d '[:space:]' <"$STATE_FILE"
+  else
+    echo off
+  fi
+}
+
+notify() {
+  local msg=$1
+  if command -v omarchy-notification-send >/dev/null 2>&1; then
+    omarchy-notification-send -g "󰍹" "$msg" >/dev/null 2>&1 || true
+  fi
+}
+
+write_state() {
+  mkdir -p "$STATE_DIR" "$TOGGLE_DIR"
+  umask 022
+  printf '%s\n' "$1" >"$STATE_FILE"
+  chmod 644 "$STATE_FILE"
+}
+
+scale_lua() {
+  if [[ ${TOP_SCALE:-} =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+    printf '%s' "$TOP_SCALE"
+  else
+    printf '"auto"'
+  fi
+}
+
+disable_bottom() {
+  load_outputs
+  mkdir -p "$TOGGLE_DIR"
+  umask 022
+  rm -f "$ENABLE_FILE"
+  printf 'hl.monitor({ output = "%s", disabled = true })\n' "$BOTTOM" >"$DISABLE_FILE"
+  chmod 644 "$DISABLE_FILE"
+  write_state off
+  hyprctl reload >/dev/null
+  notify "Bottom OLED off (${SKU})"
+}
+
+enable_bottom() {
+  load_outputs
+  mkdir -p "$TOGGLE_DIR"
+  umask 022
+  rm -f "$DISABLE_FILE"
+  printf 'hl.monitor({ output = "%s", mode = "preferred", position = "auto-down", scale = %s })\n' \
+    "$BOTTOM" "$(scale_lua)" >"$ENABLE_FILE"
+  chmod 644 "$ENABLE_FILE"
+  write_state on
+  hyprctl reload >/dev/null
+  notify "Bottom OLED on (${SKU})"
+}
+
+print_status() {
+  load_outputs
+  local desired json_mode=0
+  desired=$(desired_state)
+  [[ ${1:-} == --json ]] && json_mode=1
+
+  if (( json_mode )); then
+    jq -n \
+      --arg sku "$SKU" \
+      --arg skuClass "$SKU_CLASS" \
+      --arg skuNote "$SKU_NOTE" \
+      --arg dmiProduct "$DMI_PRODUCT" \
+      --arg dmiBoard "$DMI_BOARD" \
+      --arg top "$TOP" \
+      --arg bottom "$BOTTOM" \
+      --arg desired "$desired" \
+      --argjson bottomDisabled "$( [[ $BOTTOM_DISABLED == true ]] && echo true || echo false )" \
+      '{
+        sku: $sku,
+        skuClass: $skuClass,
+        skuNote: $skuNote,
+        dmiProduct: $dmiProduct,
+        dmiBoard: $dmiBoard,
+        top: $top,
+        bottom: $bottom,
+        desired: $desired,
+        bottomDisabled: $bottomDisabled
+      }'
+    return
+  fi
+
+  cat <<EOF
+sku:              $SKU ($SKU_CLASS) — $SKU_NOTE
+dmi.product_name: $DMI_PRODUCT
+dmi.board_name:   $DMI_BOARD
+top:              $TOP
+bottom:           $BOTTOM
+desired:          $desired
+live.disabled:    $BOTTOM_DISABLED
+hide path:        hypr toggle Lua (not folio attach)
+EOF
+}
+
+apply_desired() {
+  case "$(desired_state)" in
+    on) enable_bottom ;;
+    *) disable_bottom ;;
+  esac
+}
+
+sku_info
+
+cmd=${1:-}
+case "$cmd" in
+  off) disable_bottom ;;
+  on) enable_bottom ;;
+  toggle)
+    if [[ $(desired_state) == on ]]; then
+      disable_bottom
+    else
+      enable_bottom
+    fi
+    ;;
+  status) print_status "${2:-}" ;;
+  apply) apply_desired ;;
+  -h | --help | help) usage ;;
+  *)
+    usage >&2
+    exit 1
+    ;;
+esac

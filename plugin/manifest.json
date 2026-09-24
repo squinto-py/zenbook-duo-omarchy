@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "id": "squinto.zenbook-duo-bottom-oled",
+  "name": "Zenbook Duo bottom OLED",
+  "version": "1.0.0",
+  "author": "squinto",
+  "license": "MIT",
+  "description": "UX8406CA (not UX8406MA) bottom OLED (eDP-2) stays off by default. Operator toggle turns it on. Does not use folio/keyboard attach as a hide path.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "Bottom OLED",
+    "description": "Toggle the Zenbook Duo bottom OLED (eDP-2). Default off.",
+    "category": "System",
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
+}
