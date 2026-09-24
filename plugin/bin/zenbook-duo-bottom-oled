@@ -3,11 +3,14 @@
 #
 # Default: OFF. Operator must explicitly turn it ON.
 # Folio/keyboard attach is NOT a hide path (stock Omarchy does not hide eDP-2).
-# Persist via Omarchy hypr toggle Lua (sourced at compositor load) — no extra
-# process, no udev, no second compositor when the panel is off.
-# Live apply: hyprctl eval 'hl.monitor({ ... })'. Quiet: no keyword, no
-# compositor reload, no desktop notify.
 #
+# Live apply: hyprctl eval only. Do NOT hyprctl reload. Do NOT rewrite
+# ~/.local/state/omarchy/toggles/hypr/*.lua on toggle — that directory is
+# require()'d by Omarchy and Hyprland autoreload (misc:disable_autoreload=false)
+# plus omarchy-hyprland-monitor-watch recover_modeless (hyprctl reload on
+# monitoradded/removed). Those two were FRIC-028 "spams a command".
+#
+# Reboot persist: a static stub lua (written once) reads STATE_FILE.
 # SKU labels: UX8406CA (Lunar Lake) vs UX8406MA vs generic.
 
 set -euo pipefail
@@ -15,8 +18,11 @@ set -euo pipefail
 STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/omarchy"
 STATE_FILE="$STATE_DIR/zenbook-duo-bottom-oled"
 TOGGLE_DIR="$STATE_DIR/toggles/hypr"
-DISABLE_FILE="$TOGGLE_DIR/zenbook-duo-bottom-oled-disable.lua"
-ENABLE_FILE="$TOGGLE_DIR/zenbook-duo-bottom-oled-enable.lua"
+STUB_FILE="$TOGGLE_DIR/zenbook-duo-bottom-oled.lua"
+LEGACY_DISABLE="$TOGGLE_DIR/zenbook-duo-bottom-oled-disable.lua"
+LEGACY_ENABLE="$TOGGLE_DIR/zenbook-duo-bottom-oled-enable.lua"
+CLAMSHELL_LOCK="${XDG_RUNTIME_DIR:-/tmp}/omarchy-monitor-clamshell.lock"
+MODELESS_LOCK="${XDG_RUNTIME_DIR:-/tmp}/omarchy-monitor-modeless.lock"
 
 usage() {
   cat <<'EOF'
@@ -70,7 +76,6 @@ load_outputs() {
   TOP="${EDPS[0]:-}"
   BOTTOM="${EDPS[1]:-}"
 
-  # Prefer the conventional Duo name when present.
   if jq -e '.[] | select(.name == "eDP-2")' <<<"$json" >/dev/null; then
     BOTTOM="eDP-2"
   fi
@@ -99,46 +104,47 @@ desired_state() {
   fi
 }
 
-# Live apply on Hyprland 0.56 Lua. Keyword parser is legacy-only; do not
-# force a compositor reload (noisy; W1 is quiet). Enable MUST pass
-# disabled = false — omitting it returns ok and leaves the output off.
-live_eval() {
-  local lua=$1
-  local out rc
-  out=$(hyprctl eval "$lua")
-  rc=$?
-  if [[ $rc -ne 0 || $out != ok ]]; then
-    echo "hyprctl eval failed (exit $rc)" >&2
-    echo "lua: $lua" >&2
-    printf '%s\n' "$out" >&2
-    exit 1
-  fi
-}
-
-wait_disabled() {
-  local want=$1
-  local i json got=""
-  for i in $(seq 1 20); do
-    json=$(hyprctl monitors all -j) || {
-      echo "hyprctl monitors failed while waiting for disabled=$want" >&2
-      exit 1
-    }
-    got=$(jq -r --arg n "$BOTTOM" '.[] | select(.name == $n) | .disabled' <<<"$json")
-    if [[ $got == "$want" ]]; then
-      return 0
-    fi
-    sleep 0.1
-  done
-  echo "hyprctl eval did not set $BOTTOM disabled=$want (live=$got). No reload fallback." >&2
-  hyprctl monitors all -j >&2
-  exit 1
-}
-
 write_state() {
-  mkdir -p "$STATE_DIR" "$TOGGLE_DIR"
+  mkdir -p "$STATE_DIR"
   umask 022
   printf '%s\n' "$1" >"$STATE_FILE"
   chmod 644 "$STATE_FILE"
+}
+
+# Static stub: sourced at compositor start. Never rewrite on toggle.
+stub_lua() {
+  cat <<EOF
+-- squinto.zenbook-duo-bottom-oled — static stub, do not rewrite on toggle.
+-- Hyprland autoreloads this directory; live apply is hyprctl eval + STATE_FILE.
+local state_path = (os.getenv("XDG_STATE_HOME") or (os.getenv("HOME") .. "/.local/state")) .. "/omarchy/zenbook-duo-bottom-oled"
+local f = io.open(state_path, "r")
+local desired = "off"
+if f then
+  desired = (f:read("*l") or "off"):gsub("%s+", "")
+  f:close()
+end
+if desired ~= "on" then
+  hl.monitor({ output = "$BOTTOM", disabled = true })
+end
+EOF
+}
+
+ensure_stub() {
+  mkdir -p "$TOGGLE_DIR"
+  umask 022
+  local tmp want
+  want=$(stub_lua)
+  if [[ -f $STUB_FILE ]]; then
+    if [[ $(cat "$STUB_FILE") == "$want" ]]; then
+      rm -f "$LEGACY_DISABLE" "$LEGACY_ENABLE"
+      return 0
+    fi
+  fi
+  tmp=$(mktemp "$TOGGLE_DIR/.zenbook-duo-bottom-oled.lua.XXXXXX")
+  printf '%s\n' "$want" >"$tmp"
+  chmod 644 "$tmp"
+  mv -f "$tmp" "$STUB_FILE"
+  rm -f "$LEGACY_DISABLE" "$LEGACY_ENABLE"
 }
 
 scale_lua() {
@@ -149,29 +155,56 @@ scale_lua() {
   fi
 }
 
+# Hold Omarchy monitor-watch locks so recover_modeless cannot hyprctl reload
+# when eDP-2 add/remove fires.
+with_monitor_locks() {
+  mkdir -p "${XDG_RUNTIME_DIR:-/tmp}"
+  flock "$CLAMSHELL_LOCK" flock "$MODELESS_LOCK" "$@"
+}
+
+apply_live() {
+  local lua=$1
+  local want=$2
+  # Keep locks across eval + settle so delayed monitoradded/removed cannot reload.
+  with_monitor_locks bash -c '
+    set -euo pipefail
+    lua=$1
+    want=$2
+    bottom=$3
+    out=$(hyprctl eval "$lua")
+    rc=$?
+    if [[ $rc -ne 0 || $out != ok ]]; then
+      echo "hyprctl eval failed (exit $rc)" >&2
+      echo "lua: $lua" >&2
+      printf "%s\n" "$out" >&2
+      exit 1
+    fi
+    for i in $(seq 1 20); do
+      json=$(hyprctl monitors all -j) || exit 1
+      got=$(jq -r --arg n "$bottom" ".[] | select(.name == \$n) | .disabled" <<<"$json")
+      if [[ $got == "$want" ]]; then
+        sleep 0.4
+        exit 0
+      fi
+      sleep 0.1
+    done
+    echo "hyprctl eval did not set $bottom disabled=$want (live=$got). No reload fallback." >&2
+    exit 1
+  ' _ "$lua" "$want" "$BOTTOM"
+}
+
 disable_bottom() {
   load_outputs
-  mkdir -p "$TOGGLE_DIR"
-  umask 022
-  rm -f "$ENABLE_FILE"
-  printf 'hl.monitor({ output = "%s", disabled = true })\n' "$BOTTOM" >"$DISABLE_FILE"
-  chmod 644 "$DISABLE_FILE"
   write_state off
-  live_eval "$(tr -d '\n' <"$DISABLE_FILE")"
-  wait_disabled true
+  ensure_stub
+  apply_live "hl.monitor({ output = \"$BOTTOM\", disabled = true })" true
 }
 
 enable_bottom() {
   load_outputs
-  mkdir -p "$TOGGLE_DIR"
-  umask 022
-  rm -f "$DISABLE_FILE"
-  printf 'hl.monitor({ output = "%s", disabled = false, mode = "preferred", position = "auto-down", scale = %s })\n' \
-    "$BOTTOM" "$(scale_lua)" >"$ENABLE_FILE"
-  chmod 644 "$ENABLE_FILE"
   write_state on
-  live_eval "$(tr -d '\n' <"$ENABLE_FILE")"
-  wait_disabled false
+  ensure_stub
+  apply_live "hl.monitor({ output = \"$BOTTOM\", disabled = false, mode = \"preferred\", position = \"auto-down\", scale = $(scale_lua) })" false
 }
 
 print_status() {
@@ -213,7 +246,7 @@ top:              $TOP
 bottom:           $BOTTOM
 desired:          $desired
 live.disabled:    $BOTTOM_DISABLED
-hide path:        hyprctl eval + toggle Lua (not folio)
+hide path:        hyprctl eval (locks held; stub lua not rewritten)
 EOF
 }
 

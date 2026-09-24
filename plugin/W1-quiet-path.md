@@ -1,14 +1,22 @@
-# W1 quiet path (Hyprland 0.56.2 Lua)
+# W1 quiet path (FRIC-028)
 
 SKU: UX8406CA (CA, not MA). Bottom OLED is `eDP-2`.
 
-Live apply is `hyprctl eval` with Omarchy Lua `hl.monitor({ ... })`. The legacy keyword parser is rejected on this compositor. Do not force a compositor config reload. Mute desktop notify.
+Live apply is `hyprctl eval` with Omarchy Lua `hl.monitor({ ... })`.
 
-```
-hyprctl eval 'hl.monitor({ output = "eDP-2", disabled = true })'
-hyprctl eval 'hl.monitor({ output = "eDP-2", disabled = false, mode = "preferred", position = "auto-down", scale = 2 })'
-```
+**Do not** rewrite files under `~/.local/state/omarchy/toggles/hypr/` on every
+on/off. Omarchy `default.hypr.toggles` require()'s that dir; Hyprland
+`misc:disable_autoreload` is false, so a write triggers config reload.
+`omarchy-hyprland-monitor-watch recover_modeless` also `hyprctl reload`s on
+monitoradded/removed (enable/disable eDP-2). Together that is the command spam.
 
-Enable **must** include `disabled = false`. Omitting it returns `ok` and leaves eDP-2 off.
+Quiet path:
+1. Persist desired state only in `~/.local/state/omarchy/zenbook-duo-bottom-oled`.
+2. Write a **static** stub lua once (`zenbook-duo-bottom-oled.lua`) that reads
+   the state file at compositor start. Never rewrite it on toggle.
+3. Hold Omarchy's clamshell + modeless flock locks across eval+settle so
+   monitor-watch cannot reload.
+4. No `omarchy-notification-send`. No `hyprctl keyword` (Lua parser). No
+   `hyprctl reload` fallback.
 
-Persist (umask 022, mode 644) still under `~/.local/state/omarchy/toggles/hypr/` so the next compositor start matches. Default OFF. Folio is not the hide path.
+Enable must include `disabled = false`. Folio is not the hide path.
