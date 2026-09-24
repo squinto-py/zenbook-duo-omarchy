@@ -106,7 +106,8 @@ BarWidget {
     anchors.fill: parent
     bar: root.bar
     dimmed: !root.cliPresent
-    text: root.panelOn ? "OLED" : "OLED·"
+    // Nerd Font MD: dual displays when on, monitor-off when blanked.
+    text: root.panelOn ? "󰍺" : "󰶐"
     tooltipText: {
       if (!root.cliPresent)
         return "Bottom OLED CLI missing — widget is a no-op"
