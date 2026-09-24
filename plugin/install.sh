@@ -33,6 +33,10 @@ chmod 755 "$DEST/bin/zenbook-duo-bottom-oled" "$DEST/install.sh"
 
 "$DEST/bin/zenbook-duo-bottom-oled" apply
 
+if [[ -x $DEST/keyboard/zenbook-duo-fake-touchpad.sh ]]; then
+  "$DEST/keyboard/zenbook-duo-fake-touchpad.sh" apply
+fi
+
 echo "Installed $ID at $DEST"
 echo "eDP-2 default OFF applied via Hyprland toggle Lua (no folio hide path)."
 echo "Toggle: $DEST/bin/zenbook-duo-bottom-oled {on|off|toggle|status}"

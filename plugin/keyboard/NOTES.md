@@ -134,3 +134,8 @@ Do **not** `omarchy refresh` / `omarchy reinstall` for this.
 - Touch main, w1, w2 trees; `omarchy reinstall` configs; `hyprctl reload` loops
 - Push, post, hermes gateway, clone `/data/ourea`
 - `omarchy toggle touchpad` (would persist-disable ELAN9008 fake pad, not folio)
+
+
+## W3 land (2026-09-24)
+
+Plugin helper `zenbook-duo-fake-touchpad.sh` disables **both** CA fake OLED touchpads (ELAN9008 top + ELAN9009 bottom) live and persists a static hypr stub. Folio Primax trackpad is not touched. Do not `omarchy toggle touchpad`. Operator still confirms whether cursor-jump is gone (FRIC-029).
