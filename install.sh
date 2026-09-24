@@ -50,10 +50,8 @@ echo "Toggle: $DEST/bin/zenbook-duo-bottom-oled {on|off|toggle|status}"
 
 if (( ENABLE_WIDGET )); then
   omarchy-shell shell rescanPlugins >/dev/null 2>&1 || true
-  # Telegram lives on the top bar as a StatusNotifierItem inside omarchy.tray
-  # (right section of ~/.config/omarchy/shell.json). Place this widget next to it.
   omarchy plugin enable "$ID" --after omarchy.tray
-  echo "Bar widget enabled next to omarchy.tray (Telegram tray icon)."
+  echo "Bar widget enabled after omarchy.tray."
 else
   echo "Bar widget not enabled (least extra shell load). Optional:"
   echo "  omarchy plugin enable $ID --after omarchy.tray"

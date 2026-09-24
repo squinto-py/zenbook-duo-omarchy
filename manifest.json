@@ -5,7 +5,7 @@
   "version": "1.0.0",
   "author": "squinto",
   "license": "MIT",
-  "description": "UX8406CA (not UX8406MA) bottom OLED (eDP-2) stays off by default. Operator toggle turns it on. Does not use folio/keyboard attach as a hide path.",
+  "description": "UX8406CA (not UX8406MA) bottom OLED (eDP-2) stays off by default. A bar button turns it on. Does not use folio/keyboard attach as a hide path.",
   "kinds": [
     "bar-widget"
   ],
@@ -14,7 +14,7 @@
   },
   "barWidget": {
     "displayName": "Bottom OLED",
-    "description": "Toggle the Zenbook Duo bottom OLED (eDP-2). Default off. Lands in the right section; enable with --after omarchy.tray to sit next to the Telegram tray icon.",
+    "description": "Toggle the Zenbook Duo bottom OLED (eDP-2). Default off. Enable with --after omarchy.tray to sit in the right cluster after the system tray.",
     "category": "System",
     "allowMultiple": false,
     "defaultSection": "right"

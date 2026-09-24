@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 # Toggle the ASUS Zenbook Duo bottom OLED (eDP-2) for Omarchy/Hyprland.
 #
-# Default: OFF. Operator must explicitly turn it ON.
+# Default: OFF. Turn it on with the bar button or CLI.
 # Folio/keyboard attach is NOT a hide path (stock Omarchy does not hide eDP-2).
 #
 # Live off/on: per-output DPMS (hl.dsp.dpms) + pin misc dpms-wake false so
 # typing does not relight eDP-2. Also disable the bottom ELAN touch/stylus.
 # Do NOT hyprctl reload. Do NOT
 # disabled=true live — that fires monitorremoved and Omarchy closes
-# omarchy-bar / omarchy-background (FRIC-028 ribbon flash).
+# omarchy-bar / omarchy-background (top bar flash).
 # First ON after login (stub left the panel disabled) still enables once.
 #
 # Reboot persist: static stub lua reads STATE_FILE; desired!=on => disabled=true

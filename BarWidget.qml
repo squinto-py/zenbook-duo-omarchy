@@ -3,9 +3,9 @@ import Quickshell
 import Quickshell.Io
 import qs.Ui
 
-// Operator on/off/status control for the Zenbook Duo bottom OLED (eDP-2).
-// Community plugin bar widget (not a Hermes Desktop pane). Default is off.
-// Shells out to plugin/bin/zenbook-duo-bottom-oled when present; otherwise no-op.
+// On/off/status control for the Zenbook Duo bottom OLED (eDP-2).
+// Community plugin bar widget. Default is off.
+// Shells out to bin/zenbook-duo-bottom-oled when present; otherwise no-op.
 BarWidget {
   id: root
   moduleName: "squinto.zenbook-duo-bottom-oled"

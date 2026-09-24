@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Reversible live A/B for FR-206 W3 (UX8406CA).
+# Reversible live A/B for the UX8406CA bottom OLED fake touchpad.
 # Disables only the bottom OLED extra HID collection that Hyprland treats as a
 # touchpad. Session-only: does not write Omarchy toggle files or hypr configs.
 # hyprctl reload restores enabled=true.

@@ -26,8 +26,6 @@ Then apply once (Omarchy does not run install hooks):
 
 Restart the shell so the bar glyph loads (`omarchy-restart-shell`). The bar blinks once.
 
-No root. No udev. No passwordless sudo.
-
 ## Use
 
 - Bar button next to the tray: dual-display glyph = on, monitor-off glyph = off.
@@ -53,9 +51,7 @@ Optional leftover state: `~/.local/state/omarchy/zenbook-duo-bottom-oled` and th
 
 ## What this does not do
 
-- Hermes / Telegram integration
 - Folio-as-hide
-- `visudo` NOPASSWD ALL
 - World-writable udev
 - Editing `/usr/share/omarchy/`
 - Global DPMS (that blanks **both** panels)
