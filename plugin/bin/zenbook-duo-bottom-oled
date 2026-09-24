@@ -5,6 +5,8 @@
 # Folio/keyboard attach is NOT a hide path (stock Omarchy does not hide eDP-2).
 # Persist via Omarchy hypr toggle Lua (sourced at compositor load) — no extra
 # process, no udev, no second compositor when the panel is off.
+# Live apply: hyprctl eval 'hl.monitor({ ... })'. Quiet: no keyword, no
+# compositor reload, no desktop notify.
 #
 # SKU labels: UX8406CA (Lunar Lake) vs UX8406MA vs generic.
 
@@ -97,11 +99,39 @@ desired_state() {
   fi
 }
 
-notify() {
-  local msg=$1
-  if command -v omarchy-notification-send >/dev/null 2>&1; then
-    omarchy-notification-send -g "󰍹" "$msg" >/dev/null 2>&1 || true
+# Live apply on Hyprland 0.56 Lua. Keyword parser is legacy-only; do not
+# force a compositor reload (noisy; W1 is quiet). Enable MUST pass
+# disabled = false — omitting it returns ok and leaves the output off.
+live_eval() {
+  local lua=$1
+  local out rc
+  out=$(hyprctl eval "$lua")
+  rc=$?
+  if [[ $rc -ne 0 || $out != ok ]]; then
+    echo "hyprctl eval failed (exit $rc)" >&2
+    echo "lua: $lua" >&2
+    printf '%s\n' "$out" >&2
+    exit 1
   fi
+}
+
+wait_disabled() {
+  local want=$1
+  local i json got=""
+  for i in $(seq 1 20); do
+    json=$(hyprctl monitors all -j) || {
+      echo "hyprctl monitors failed while waiting for disabled=$want" >&2
+      exit 1
+    }
+    got=$(jq -r --arg n "$BOTTOM" '.[] | select(.name == $n) | .disabled' <<<"$json")
+    if [[ $got == "$want" ]]; then
+      return 0
+    fi
+    sleep 0.1
+  done
+  echo "hyprctl eval did not set $BOTTOM disabled=$want (live=$got). No reload fallback." >&2
+  hyprctl monitors all -j >&2
+  exit 1
 }
 
 write_state() {
@@ -127,8 +157,8 @@ disable_bottom() {
   printf 'hl.monitor({ output = "%s", disabled = true })\n' "$BOTTOM" >"$DISABLE_FILE"
   chmod 644 "$DISABLE_FILE"
   write_state off
-  hyprctl reload >/dev/null
-  notify "Bottom OLED off (${SKU})"
+  live_eval "$(tr -d '\n' <"$DISABLE_FILE")"
+  wait_disabled true
 }
 
 enable_bottom() {
@@ -136,12 +166,12 @@ enable_bottom() {
   mkdir -p "$TOGGLE_DIR"
   umask 022
   rm -f "$DISABLE_FILE"
-  printf 'hl.monitor({ output = "%s", mode = "preferred", position = "auto-down", scale = %s })\n' \
+  printf 'hl.monitor({ output = "%s", disabled = false, mode = "preferred", position = "auto-down", scale = %s })\n' \
     "$BOTTOM" "$(scale_lua)" >"$ENABLE_FILE"
   chmod 644 "$ENABLE_FILE"
   write_state on
-  hyprctl reload >/dev/null
-  notify "Bottom OLED on (${SKU})"
+  live_eval "$(tr -d '\n' <"$ENABLE_FILE")"
+  wait_disabled false
 }
 
 print_status() {
@@ -183,7 +213,7 @@ top:              $TOP
 bottom:           $BOTTOM
 desired:          $desired
 live.disabled:    $BOTTOM_DISABLED
-hide path:        hypr toggle Lua (not folio attach)
+hide path:        hyprctl eval + toggle Lua (not folio)
 EOF
 }
 
