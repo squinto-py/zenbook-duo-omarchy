@@ -14,7 +14,7 @@
   },
   "barWidget": {
     "displayName": "Bottom OLED",
-    "description": "Toggle the Zenbook Duo bottom OLED (eDP-2). Default off.",
+    "description": "Toggle the Zenbook Duo bottom OLED (eDP-2). Default off. Lands in the right section; enable with --after omarchy.tray to sit next to the Telegram tray icon.",
     "category": "System",
     "allowMultiple": false,
     "defaultSection": "right"
