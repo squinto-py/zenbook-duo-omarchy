@@ -28,7 +28,14 @@ mkdir -p "$(dirname "$DEST")"
 rm -rf "$DEST"
 mkdir -p "$DEST"
 umask 022
-cp -a "$ROOT/." "$DEST/"
+if command -v rsync >/dev/null; then
+  rsync -a --delete --exclude .git --exclude .gitignore --exclude README.md --exclude LICENSE --exclude W1-quiet-path.md "$ROOT/" "$DEST/"
+else
+  mkdir -p "$DEST"
+  for n in manifest.json BarWidget.qml install.sh bin keyboard; do
+    [[ -e $ROOT/$n ]] && cp -a "$ROOT/$n" "$DEST/"
+  done
+fi
 chmod 755 "$DEST/bin/zenbook-duo-bottom-oled" "$DEST/install.sh"
 
 "$DEST/bin/zenbook-duo-bottom-oled" apply

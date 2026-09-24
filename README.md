@@ -1,10 +1,8 @@
-# zenbook-duo-omarchy
+# Zenbook Duo bottom OLED (Omarchy plugin)
 
-Omarchy / Hyprland patches for the **ASUS Zenbook Duo UX8406CA** (Lunar Lake, Arc 140V-class). **Not UX8406MA.** Not the Ourea vault.
+Community plugin for the **ASUS Zenbook Duo UX8406CA** on Omarchy / Hyprland.
 
-## Slice 1 — bottom OLED community plugin
-
-Stock Omarchy enables every connected panel via the catch-all `hl.monitor({ output = "" })`. `omarchy-hyprland-monitor-laptop` only returns the **first** internal output (`eDP-1`). Clamshell / folio attach therefore **does not** hide `eDP-2`. This plugin turns the bottom OLED **off by default** and gives the operator an explicit **on** toggle.
+The bottom OLED (`eDP-2`) stays **off by default**. A bar button (right cluster, after the system tray) turns it on. Folio attach is **not** the hide path — stock Omarchy does not hide `eDP-2` when the keyboard is clipped.
 
 | SKU | Class | Notes |
 |-----|-------|--------|
@@ -12,58 +10,56 @@ Stock Omarchy enables every connected panel via the catch-all `hl.monitor({ outp
 | UX8406MA | MA | Same Duo chassis, different SoC. Script labels MA and still targets `eDP-2` if present. |
 | other | generic | Refuses if there is no second internal panel. |
 
-### Install (no root)
+## Install
 
-```bash
-cd /home/squinto/src/zenbook-duo-omarchy
-omarchy plugin validate ./plugin
-./plugin/install.sh                 # copies plugin, applies eDP-2 OFF
-# optional bar widget:
-./plugin/install.sh --enable-widget
+```
+omarchy plugin add https://github.com/squinto-py/zenbook-duo-omarchy.git --enable
+omarchy plugin enable squinto.zenbook-duo-bottom-oled --after omarchy.tray
 ```
 
-`omarchy plugin add <git-url>` is **not** used here: this repo is a multi-slice tree, so `manifest.json` lives under `plugin/` rather than the repo root.
+Then apply once (Omarchy does not run install hooks):
 
-### Toggle (off by default)
-
-Desired state lives in `~/.local/state/omarchy/zenbook-duo-bottom-oled` (`on` / `off`). Missing file means **off**.
-
-Hyprland persistence (sourced by Omarchy `default.hypr.toggles`, no extra process):
-
-- off: `~/.local/state/omarchy/toggles/hypr/zenbook-duo-bottom-oled-disable.lua`
-- on: `~/.local/state/omarchy/toggles/hypr/zenbook-duo-bottom-oled-enable.lua` (`position = "auto-down"`)
-
-```bash
-plugin/bin/zenbook-duo-bottom-oled status
-plugin/bin/zenbook-duo-bottom-oled on       # operator: turn bottom OLED on
-plugin/bin/zenbook-duo-bottom-oled off      # default
-plugin/bin/zenbook-duo-bottom-oled toggle
-plugin/bin/zenbook-duo-bottom-oled apply    # re-apply desired (default off)
+```
+~/.config/omarchy/plugins/squinto.zenbook-duo-bottom-oled/bin/zenbook-duo-bottom-oled apply
+~/.config/omarchy/plugins/squinto.zenbook-duo-bottom-oled/keyboard/zenbook-duo-fake-touchpad.sh apply
 ```
 
-Optional keybind in `~/.config/hypr/bindings.lua` (not shipped; do not bind folio attach):
+Restart the shell so the bar glyph loads (`omarchy-restart-shell`). The bar blinks once.
 
-```lua
-o.bind("SUPER + CTRL + O", "Bottom OLED", "/home/squinto/src/zenbook-duo-omarchy/plugin/bin/zenbook-duo-bottom-oled toggle")
+No root. No udev. No passwordless sudo.
+
+## Use
+
+- Bar button next to the tray: dual-display glyph = on, monitor-off glyph = off.
+- CLI (same dest `bin/zenbook-duo-bottom-oled`): `status` · `on` · `off` · `toggle` · `apply`
+
+Missing state file = **off**. Live off is per-output DPMS on `eDP-2` only (the top panel stays up). Login persist still compositor-disables `eDP-2` so a cold start is lag-correct. The first **on** after that disable hitchs once; later in-session toggles do not tear the Omarchy bar.
+
+Typing does not relight the bottom panel (the plugin pins Omarchy `key_press_enables_dpms` / `mouse_move_enables_dpms` false while the bottom is desired-off, and restores them on enable).
+
+## Keyboard (CA)
+
+Each OLED also exposes a full-panel fake **touchpad** (`elan9008` top / `elan9009` bottom) plus a bottom **touchscreen**. Those are what jump the cursor while typing — not the folio Primax trackpad.
+
+The helper disables both fake pads always, and the bottom digitizer with the panel. Do **not** run `omarchy toggle touchpad` (it matches the first ELAN node). Do not disable the folio trackpad.
+
+## Remove
+
+```
+omarchy plugin remove squinto.zenbook-duo-bottom-oled
 ```
 
-### Design constraints
+Optional leftover state: `~/.local/state/omarchy/zenbook-duo-bottom-oled` and the two static lua stubs under `~/.local/state/omarchy/toggles/hypr/` (`zenbook-duo-bottom-oled.lua`, `zenbook-duo-fake-touchpad.lua`).
 
-- **Least privilege:** user-owned state + `hyprctl reload`. No udev, nothing world-writable, no extra compositor when the panel is off (`disabled = true` so Hyprland does not composite `eDP-2`).
-- **Hide path:** Hyprland monitor disable, not folio/keyboard attach.
-- Bar widget is optional. Enabling it is extra **shell** load, not extra **compositor** load for the off panel.
+## What this does not do
 
-## Slice 2 (not this change)
-
-Keyboard cursor-jump when the folio is attached. Do not block slice 1 on it.
-
-## What this repo / this slice did **not** do
-
-- hermes gateway
-- `--yolo`
+- Hermes / Telegram integration
+- Folio-as-hide
 - `visudo` NOPASSWD ALL
-- extra git worktree / clone of `/data/ourea`
-- upstream post or public PR
-- Hermes Desktop plugin
-- world-writable udev rules
-- editing `/usr/share/omarchy/`
+- World-writable udev
+- Editing `/usr/share/omarchy/`
+- Global DPMS (that blanks **both** panels)
+
+## License
+
+MIT. See `LICENSE`.
