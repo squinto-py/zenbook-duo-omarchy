@@ -4,7 +4,9 @@
 # Default: OFF. Operator must explicitly turn it ON.
 # Folio/keyboard attach is NOT a hide path (stock Omarchy does not hide eDP-2).
 #
-# Live off/on: per-output DPMS (hl.dsp.dpms). Do NOT hyprctl reload. Do NOT
+# Live off/on: per-output DPMS (hl.dsp.dpms) + pin misc dpms-wake false so
+# typing does not relight eDP-2. Also disable the bottom ELAN touch/stylus.
+# Do NOT hyprctl reload. Do NOT
 # disabled=true live — that fires monitorremoved and Omarchy closes
 # omarchy-bar / omarchy-background (FRIC-028 ribbon flash).
 # First ON after login (stub left the panel disabled) still enables once.
@@ -216,10 +218,38 @@ live_dpms() {
   exit 1
 }
 
+set_dpms_wake() {
+  local enabled=$1
+  local lua out rc
+  lua="hl.config({ misc = { key_press_enables_dpms = ${enabled}, mouse_move_enables_dpms = ${enabled} } })"
+  out=$(hyprctl eval "$lua")
+  rc=$?
+  if [[ $rc -ne 0 || $out != ok ]]; then
+    echo "hyprctl eval failed setting dpms-wake=${enabled} (exit $rc)" >&2
+    printf '%s\n' "$out" >&2
+    exit 1
+  fi
+}
+
+set_bottom_digitizer() {
+  local enabled=$1
+  local name lua out
+  for name in "elan9009:00-04f3:4448" "elan9009:00-04f3:4448-stylus"; do
+    lua="hl.device({ name = \"${name}\", enabled = ${enabled} })"
+    out=$(hyprctl eval "$lua")
+    if [[ $out != ok ]]; then
+      echo "hyprctl eval failed digitizer ${name} enabled=${enabled}: $out" >&2
+      exit 1
+    fi
+  done
+}
+
 disable_bottom() {
   load_outputs
   write_state off
   ensure_stub
+  set_dpms_wake false
+  set_bottom_digitizer false
   if [[ $BOTTOM_DISABLED == true ]]; then
     return 0
   fi
@@ -230,6 +260,7 @@ enable_bottom() {
   load_outputs
   write_state on
   ensure_stub
+  set_dpms_wake true
   if [[ $BOTTOM_DISABLED == true ]]; then
     apply_live_disabled "hl.monitor({ output = \"$BOTTOM\", disabled = false, mode = \"preferred\", position = \"auto-down\", scale = $(scale_lua) })" false
     load_outputs
@@ -237,6 +268,7 @@ enable_bottom() {
   if [[ $BOTTOM_DPMS != true ]]; then
     live_dpms on true
   fi
+  set_bottom_digitizer true
 }
 
 print_status() {
