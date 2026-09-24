@@ -2,21 +2,15 @@
 
 SKU: UX8406CA (CA, not MA). Bottom OLED is `eDP-2`.
 
-Live apply is `hyprctl eval` with Omarchy Lua `hl.monitor({ ... })`.
+Live toggle is per-output DPMS:
+  hl.dispatch(hl.dsp.dpms({ action = "off"|"on", monitor = "eDP-2" }))
+Never omit monitor (global dpms blanks eDP-1).
 
-**Do not** rewrite files under `~/.local/state/omarchy/toggles/hypr/` on every
-on/off. Omarchy `default.hypr.toggles` require()'s that dir; Hyprland
-`misc:disable_autoreload` is false, so a write triggers config reload.
-`omarchy-hyprland-monitor-watch recover_modeless` also `hyprctl reload`s on
-monitoradded/removed (enable/disable eDP-2). Together that is the command spam.
+Do **not** `disabled = true` on live off — that is `monitorremoved` and Omarchy
+closes `omarchy-bar` / `omarchy-background` (top ribbon flash).
 
-Quiet path:
-1. Persist desired state only in `~/.local/state/omarchy/zenbook-duo-bottom-oled`.
-2. Write a **static** stub lua once (`zenbook-duo-bottom-oled.lua`) that reads
-   the state file at compositor start. Never rewrite it on toggle.
-3. Hold Omarchy's clamshell + modeless flock locks across eval+settle so
-   monitor-watch cannot reload.
-4. No `omarchy-notification-send`. No `hyprctl keyword` (Lua parser). No
-   `hyprctl reload` fallback.
+Login persist: static stub lua reads STATE_FILE; desired!=on => disabled=true
+(lag-correct). Never rewrite `toggles/hypr` on toggle.
 
-Enable must include `disabled = false`. Folio is not the hide path.
+First ON after a disabled login still enables the output once (bar hitch that
+once). Later off/on in the same session should be DPMS-only (no layer close).

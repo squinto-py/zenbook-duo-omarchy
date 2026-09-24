@@ -4,13 +4,14 @@
 # Default: OFF. Operator must explicitly turn it ON.
 # Folio/keyboard attach is NOT a hide path (stock Omarchy does not hide eDP-2).
 #
-# Live apply: hyprctl eval only. Do NOT hyprctl reload. Do NOT rewrite
-# ~/.local/state/omarchy/toggles/hypr/*.lua on toggle — that directory is
-# require()'d by Omarchy and Hyprland autoreload (misc:disable_autoreload=false)
-# plus omarchy-hyprland-monitor-watch recover_modeless (hyprctl reload on
-# monitoradded/removed). Those two were FRIC-028 "spams a command".
+# Live off/on: per-output DPMS (hl.dsp.dpms). Do NOT hyprctl reload. Do NOT
+# disabled=true live — that fires monitorremoved and Omarchy closes
+# omarchy-bar / omarchy-background (FRIC-028 ribbon flash).
+# First ON after login (stub left the panel disabled) still enables once.
 #
-# Reboot persist: a static stub lua (written once) reads STATE_FILE.
+# Reboot persist: static stub lua reads STATE_FILE; desired!=on => disabled=true
+# (lag-correct, no extra composite). Never rewrite toggles/hypr on toggle.
+#
 # SKU labels: UX8406CA (Lunar Lake) vs UX8406MA vs generic.
 
 set -euo pipefail
@@ -28,10 +29,10 @@ usage() {
   cat <<'EOF'
 Usage: zenbook-duo-bottom-oled <off|on|toggle|status|apply>
 
-  off      Disable bottom OLED (eDP-2). This is the default.
-  on       Enable bottom OLED below the top panel (operator toggle).
+  off      Blank bottom OLED (live: DPMS). Default. Login persist: disabled.
+  on       Light bottom OLED below the top panel.
   toggle   Flip desired state.
-  status   Print SKU, outputs, desired/live state.
+  status   Print SKU, outputs, desired/live/dpms.
   apply    Re-apply desired state (missing state file => off).
 
 EOF
@@ -93,6 +94,7 @@ load_outputs() {
   fi
 
   BOTTOM_DISABLED=$(jq -r --arg n "$BOTTOM" '.[] | select(.name == $n) | .disabled' <<<"$json")
+  BOTTOM_DPMS=$(jq -r --arg n "$BOTTOM" '.[] | select(.name == $n) | .dpmsStatus' <<<"$json")
   TOP_SCALE=$(jq -r --arg n "$TOP" '.[] | select(.name == $n) | .scale' <<<"$json")
 }
 
@@ -111,11 +113,10 @@ write_state() {
   chmod 644 "$STATE_FILE"
 }
 
-# Static stub: sourced at compositor start. Never rewrite on toggle.
 stub_lua() {
   cat <<EOF
 -- squinto.zenbook-duo-bottom-oled — static stub, do not rewrite on toggle.
--- Hyprland autoreloads this directory; live apply is hyprctl eval + STATE_FILE.
+-- Login: desired!=on => disabled (lag-correct). Live toggle is DPMS, not this file.
 local state_path = (os.getenv("XDG_STATE_HOME") or (os.getenv("HOME") .. "/.local/state")) .. "/omarchy/zenbook-duo-bottom-oled"
 local f = io.open(state_path, "r")
 local desired = "off"
@@ -132,19 +133,15 @@ EOF
 ensure_stub() {
   mkdir -p "$TOGGLE_DIR"
   umask 022
-  local tmp want
-  want=$(stub_lua)
+  rm -f "$LEGACY_DISABLE" "$LEGACY_ENABLE"
   if [[ -f $STUB_FILE ]]; then
-    if [[ $(cat "$STUB_FILE") == "$want" ]]; then
-      rm -f "$LEGACY_DISABLE" "$LEGACY_ENABLE"
-      return 0
-    fi
+    return 0
   fi
+  local tmp
   tmp=$(mktemp "$TOGGLE_DIR/.zenbook-duo-bottom-oled.lua.XXXXXX")
-  printf '%s\n' "$want" >"$tmp"
+  stub_lua >"$tmp"
   chmod 644 "$tmp"
   mv -f "$tmp" "$STUB_FILE"
-  rm -f "$LEGACY_DISABLE" "$LEGACY_ENABLE"
 }
 
 scale_lua() {
@@ -155,17 +152,14 @@ scale_lua() {
   fi
 }
 
-# Hold Omarchy monitor-watch locks so recover_modeless cannot hyprctl reload
-# when eDP-2 add/remove fires.
 with_monitor_locks() {
   mkdir -p "${XDG_RUNTIME_DIR:-/tmp}"
   flock "$CLAMSHELL_LOCK" flock "$MODELESS_LOCK" "$@"
 }
 
-apply_live() {
+apply_live_disabled() {
   local lua=$1
   local want=$2
-  # Keep locks across eval + settle so delayed monitoradded/removed cannot reload.
   with_monitor_locks bash -c '
     set -euo pipefail
     lua=$1
@@ -193,18 +187,56 @@ apply_live() {
   ' _ "$lua" "$want" "$BOTTOM"
 }
 
+# Per-output DPMS. Never omit monitor (global off blanks eDP-1).
+live_dpms() {
+  local action=$1
+  local want=$2
+  local lua out rc i json got
+  lua="hl.dispatch(hl.dsp.dpms({ action = \"${action}\", monitor = \"${BOTTOM}\" }))"
+  out=$(hyprctl eval "$lua")
+  rc=$?
+  if [[ $rc -ne 0 || $out != ok ]]; then
+    echo "hyprctl dpms ${action} ${BOTTOM} failed (exit $rc)" >&2
+    echo "lua: $lua" >&2
+    printf '%s\n' "$out" >&2
+    exit 1
+  fi
+  for i in $(seq 1 20); do
+    json=$(hyprctl monitors all -j) || {
+      echo "hyprctl monitors failed while waiting for dpms=$want" >&2
+      exit 1
+    }
+    got=$(jq -r --arg n "$BOTTOM" '.[] | select(.name == $n) | .dpmsStatus' <<<"$json")
+    if [[ $got == "$want" ]]; then
+      return 0
+    fi
+    sleep 0.1
+  done
+  echo "dpms ${action} did not set $BOTTOM dpmsStatus=$want (live=$got)." >&2
+  exit 1
+}
+
 disable_bottom() {
   load_outputs
   write_state off
   ensure_stub
-  apply_live "hl.monitor({ output = \"$BOTTOM\", disabled = true })" true
+  if [[ $BOTTOM_DISABLED == true ]]; then
+    return 0
+  fi
+  live_dpms off false
 }
 
 enable_bottom() {
   load_outputs
   write_state on
   ensure_stub
-  apply_live "hl.monitor({ output = \"$BOTTOM\", disabled = false, mode = \"preferred\", position = \"auto-down\", scale = $(scale_lua) })" false
+  if [[ $BOTTOM_DISABLED == true ]]; then
+    apply_live_disabled "hl.monitor({ output = \"$BOTTOM\", disabled = false, mode = \"preferred\", position = \"auto-down\", scale = $(scale_lua) })" false
+    load_outputs
+  fi
+  if [[ $BOTTOM_DPMS != true ]]; then
+    live_dpms on true
+  fi
 }
 
 print_status() {
@@ -224,6 +256,7 @@ print_status() {
       --arg bottom "$BOTTOM" \
       --arg desired "$desired" \
       --argjson bottomDisabled "$( [[ $BOTTOM_DISABLED == true ]] && echo true || echo false )" \
+      --argjson bottomDpms "$( [[ $BOTTOM_DPMS == true ]] && echo true || echo false )" \
       '{
         sku: $sku,
         skuClass: $skuClass,
@@ -233,7 +266,8 @@ print_status() {
         top: $top,
         bottom: $bottom,
         desired: $desired,
-        bottomDisabled: $bottomDisabled
+        bottomDisabled: $bottomDisabled,
+        bottomDpms: $bottomDpms
       }'
     return
   fi
@@ -246,7 +280,8 @@ top:              $TOP
 bottom:           $BOTTOM
 desired:          $desired
 live.disabled:    $BOTTOM_DISABLED
-hide path:        hyprctl eval (locks held; stub lua not rewritten)
+live.dpms:        $BOTTOM_DPMS
+hide path:        live DPMS; login stub disables; no lua rewrite
 EOF
 }
 
