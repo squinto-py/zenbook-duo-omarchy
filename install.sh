@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Install the bottom-OLED community plugin into the user Omarchy plugins dir.
-# No root, no udev, no visudo, no extra compositor.
+# Userland copy + apply only. Does not edit system paths or add compositor load.
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")" && pwd)
@@ -29,7 +29,7 @@ rm -rf "$DEST"
 mkdir -p "$DEST"
 umask 022
 if command -v rsync >/dev/null; then
-  rsync -a --delete --exclude .git --exclude .gitignore --exclude README.md --exclude LICENSE --exclude W1-quiet-path.md "$ROOT/" "$DEST/"
+  rsync -a --delete --exclude .git --exclude .gitignore --exclude README.md --exclude LICENSE "$ROOT/" "$DEST/"
 else
   mkdir -p "$DEST"
   for n in manifest.json BarWidget.qml install.sh bin keyboard; do
