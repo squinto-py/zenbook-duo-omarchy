@@ -3,9 +3,9 @@ import Quickshell
 import Quickshell.Io
 import qs.Ui
 
-// On/off/status control for the Zenbook Duo bottom OLED (eDP-2).
-// Community plugin bar widget. Default is off.
-// Shells out to bin/zenbook-duo-bottom-oled when present; otherwise no-op.
+// Two bar buttons for the Zenbook Duo bottom OLED (eDP-2): the panel on/off
+// toggle (default off) and the screen trackpad toggle. Shells out to the CLIs
+// in bin/; the panel button is a no-op if its CLI is missing.
 BarWidget {
   id: root
   moduleName: "squinto.zenbook-duo-bottom-oled"
@@ -30,8 +30,25 @@ BarWidget {
 
   readonly property bool panelOn: root.desired === "on"
 
-  implicitWidth: button.implicitWidth
-  implicitHeight: button.implicitHeight
+  // "off" | "on" (pad drawn on the lit panel) | "dark" (panel black, pad live)
+  property string trackpad: "off"
+
+  readonly property string trackpadStatePath: {
+    var home = Quickshell.env("HOME")
+    var xdg = Quickshell.env("XDG_STATE_HOME")
+    var dir = (xdg && xdg.length) ? xdg : (home + "/.local/state")
+    return dir + "/omarchy/zenbook-duo-screen-trackpad"
+  }
+
+  readonly property string trackpadScriptPath: {
+    var u = Qt.resolvedUrl("bin/zenbook-duo-screen-trackpad").toString()
+    if (u.indexOf("file://") === 0)
+      return u.substring(7)
+    return u
+  }
+
+  implicitWidth: buttons.implicitWidth
+  implicitHeight: buttons.implicitHeight
 
   function applyDesiredText(raw) {
     root.desired = String(raw || "").trim() === "on" ? "on" : "off"
@@ -65,6 +82,24 @@ BarWidget {
     onFileChanged: reload()
     onLoaded: root.applyDesiredText(text())
     onLoadFailed: root.desired = "off"
+  }
+
+  FileView {
+    id: trackpadStateView
+    path: root.trackpadStatePath
+    watchChanges: true
+    printErrors: false
+    onFileChanged: reload()
+    onLoaded: {
+      var s = String(text() || "").trim()
+      root.trackpad = (s === "on" || s === "dark") ? s : "off"
+    }
+    onLoadFailed: root.trackpad = "off"
+  }
+
+  Process {
+    id: trackpadProc
+    onExited: trackpadStateView.reload()
   }
 
   Process {
@@ -101,31 +136,58 @@ BarWidget {
     }
   }
 
-  WidgetButton {
-    id: button
+  Grid {
+    id: buttons
     anchors.fill: parent
-    bar: root.bar
-    dimmed: !root.cliPresent
-    // Nerd Font MD: dual displays when on, monitor-off when blanked.
-    text: root.panelOn ? "󰍺" : "󰶐"
-    tooltipText: {
-      if (!root.cliPresent)
-        return "Bottom OLED CLI missing — widget is a no-op"
-      var hint = root.statusHint.length ? " (" + root.statusHint + ")" : ""
-      if (root.panelOn)
-        return "Bottom OLED on — click to turn off" + hint
-      return "Bottom OLED off (default) — click to turn on" + hint
-    }
-    onPressed: function (buttonCode) {
-      if (!root.cliPresent)
-        return
-      if (buttonCode === Qt.RightButton) {
-        root.runCli(["status", "--json"])
-        return
+    columns: root.vertical ? 1 : 2
+
+    WidgetButton {
+      id: button
+      bar: root.bar
+      dimmed: !root.cliPresent
+      // Nerd Font MD: dual displays when on, monitor-off when blanked.
+      text: root.panelOn ? "󰍺" : "󰶐"
+      tooltipText: {
+        if (!root.cliPresent)
+          return "Bottom OLED CLI missing — widget is a no-op"
+        var hint = root.statusHint.length ? " (" + root.statusHint + ")" : ""
+        if (root.panelOn)
+          return "Bottom OLED on — click to turn off" + hint
+        return "Bottom OLED off (default) — click to turn on" + hint
       }
-      if (buttonCode !== Qt.LeftButton)
-        return
-      root.runCli(["toggle"])
+      onPressed: function (buttonCode) {
+        if (!root.cliPresent)
+          return
+        if (buttonCode === Qt.RightButton) {
+          root.runCli(["status", "--json"])
+          return
+        }
+        if (buttonCode !== Qt.LeftButton)
+          return
+        root.runCli(["toggle"])
+      }
+    }
+
+    WidgetButton {
+      bar: root.bar
+      dimmed: root.trackpad === "off"
+      // Nerd Font MD: touchpad / touchpad-off
+      text: root.trackpad === "off" ? "󰤳" : "󰟸"
+      tooltipText: {
+        if (root.trackpad === "dark")
+          return "Screen trackpad on, bottom panel dark — click to turn off"
+        if (root.trackpad === "on")
+          return "Screen trackpad on — click to turn off"
+        return root.panelOn
+          ? "Screen trackpad off — click to show it on the bottom panel"
+          : "Screen trackpad off — click to use it with the bottom panel dark"
+      }
+      onPressed: function (buttonCode) {
+        if (buttonCode !== Qt.LeftButton || trackpadProc.running)
+          return
+        trackpadProc.command = [root.trackpadScriptPath, "toggle"]
+        trackpadProc.running = true
+      }
     }
   }
 }

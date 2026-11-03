@@ -1,0 +1,5 @@
+# Zenbook Duo screen trackpad: let the logged-in seat user (uaccess) read the
+# bottom OLED touchscreen and create the virtual touchpad via uinput. Nothing
+# is world-writable; access follows the active local session.
+SUBSYSTEM=="input", KERNEL=="event*", ATTRS{name}=="ELAN9009:00 04F3:4448", TAG+="uaccess"
+KERNEL=="uinput", SUBSYSTEM=="misc", TAG+="uaccess", OPTIONS+="static_node=uinput"

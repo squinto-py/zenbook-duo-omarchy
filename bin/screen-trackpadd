@@ -1,0 +1,374 @@
+#!/usr/bin/python3 -I
+# Turn a bottom-centre rectangle of the Zenbook Duo bottom touchscreen into a
+# real touchpad.
+#
+# GRABS the ELAN touchscreen (EVIOCGRAB) so the compositor never sees its raw
+# touches -- an unbound touchscreen gets mapped to whatever monitor has the
+# cursor, so leaked pad touches grabbed/selected things on the top panel.
+#   - contacts that START inside the region go to a uinput multitouch
+#     touchpad; libinput does pointer motion, accel, two-finger scroll, gestures
+#   - every other contact goes to a uinput touchscreen clone (bound to eDP-2 in
+#     hypr/input.lua) so the rest of the panel stays a touchscreen
+#
+# Clicking is NOT left to libinput (tap_to_click is off for this device in
+# hypr/input.lua): the digitizer drops contacts mid-pan and staggers fingers at
+# the start/end of scrolls, which libinput reads as taps. Taps are detected
+# here instead, with a still/short test and a cooldown after any real gesture,
+# and sent through a separate uinput button device.
+#
+# Raw events are logged to $XDG_RUNTIME_DIR/zenbook-duo-screen-trackpad/raw.log
+# (rotated) so misfires can be replayed offline with screen-trackpad-replay.
+#
+# config.json: region geometry (mm, from the panel's bottom edge, centred) and
+# tap tuning. clickMode "tap" = tap clicks, tap-tap double-clicks, tap+hold
+# drags; "doubletap" = tap-tap clicks, tap+hold drags, single taps ignored.
+
+import json
+import os
+import select
+import sys
+import time
+
+import evdev
+from evdev import AbsInfo, UInput
+from evdev import ecodes as e
+
+CONFIG = os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "config.json")
+LOG_DIR = os.path.join(os.environ.get("XDG_RUNTIME_DIR", "/tmp"), "zenbook-duo-screen-trackpad")
+LOG_MAX = 8 * 1024 * 1024
+MAX_SLOTS = 5
+TOOLS = [e.BTN_TOOL_FINGER, e.BTN_TOOL_DOUBLETAP, e.BTN_TOOL_TRIPLETAP, e.BTN_TOOL_QUADTAP]
+TAP_BUTTONS = {1: e.BTN_LEFT, 2: e.BTN_RIGHT, 3: e.BTN_MIDDLE}
+
+
+def find_touchscreen(name):
+    for path in evdev.list_devices():
+        dev = evdev.InputDevice(path)
+        if dev.name == name and e.INPUT_PROP_DIRECT in dev.input_props():
+            return dev
+        dev.close()
+    sys.exit(f"touchscreen {name!r} not found or not readable (see README: Requirements)")
+
+
+class Slot:
+    __slots__ = ("x", "y", "sx", "sy", "owned", "fwd", "palm", "new", "start")
+
+    def __init__(self):
+        self.x = self.y = self.sx = self.sy = 0
+        self.owned = self.fwd = self.palm = self.new = self.start = False
+
+
+class Gesture:
+    """One stretch from the first finger down to the last finger up."""
+
+    __slots__ = ("t0", "fingers", "moved", "maybe_drag", "travel")
+
+    def __init__(self, t0, maybe_drag):
+        self.t0 = t0
+        self.fingers = 0
+        self.moved = False
+        self.maybe_drag = maybe_drag
+        self.travel = 0.0  # max finger displacement, device units
+
+
+class Clicker:
+    def __init__(self, cfg, buttons, log=None):
+        self.ui = buttons
+        self.log = log or (lambda *a: None)
+        self.double = cfg.get("clickMode", "tap") == "doubletap"
+        self.tap_max = cfg.get("tapMaxMs", 180) / 1000
+        self.gap = cfg.get("tapGapMs", 250) / 1000
+        self.cooldown = cfg.get("tapCooldownMs", 150) / 1000
+        self.pending = None  # time of a lone left tap waiting for a follow-up
+        self.dragging = False
+        self.gesture = None
+        self.last_gesture_end = -1.0  # end of the last pan/scroll/hold
+
+    def click(self, now, btn, n=1):
+        self.log(now, f"click {e.BTN[btn] if isinstance(e.BTN[btn], str) else e.BTN[btn][0]} x{n}")
+        for _ in range(n):
+            self.ui.write(e.EV_KEY, btn, 1)
+            self.ui.syn()
+            self.ui.write(e.EV_KEY, btn, 0)
+            self.ui.syn()
+
+    def button(self, now, btn, down):
+        self.log(now, f"{'press' if down else 'release'} BTN_LEFT")
+        self.ui.write(e.EV_KEY, btn, 1 if down else 0)
+        self.ui.syn()
+
+    def flush_pending(self, now):
+        if self.pending is not None and not self.double:
+            self.click(now, e.BTN_LEFT)
+        self.pending = None
+
+    def timeout(self, now):
+        """Seconds until the next deadline, or None."""
+        if self.pending is None or self.gesture is not None:
+            return None
+        left = self.pending + self.gap - now
+        if left <= 0:
+            self.flush_pending(now)
+            return None
+        return left
+
+    def begin(self, now):
+        follows_tap = self.pending is not None and now - self.pending <= self.gap
+        if self.pending is not None and not follows_tap:
+            self.flush_pending(now)
+        self.gesture = Gesture(now, follows_tap)
+
+    def update(self, now, fingers, travel, moved):
+        g = self.gesture
+        g.fingers = max(g.fingers, fingers)
+        g.travel = max(g.travel, travel)
+        g.moved = g.moved or moved
+        if not g.maybe_drag:
+            return
+        if g.fingers > 1:
+            g.maybe_drag = False
+            self.flush_pending(now)
+        elif g.moved or now - g.t0 > self.tap_max:
+            # tap, then touch-and-move/hold: drag
+            g.maybe_drag = False
+            self.pending = None
+            self.dragging = True
+            self.button(now, e.BTN_LEFT, True)
+
+    def end(self, now):
+        g, self.gesture = self.gesture, None
+        dur = now - g.t0
+        since = g.t0 - self.last_gesture_end
+        self.log(now, f"gesture fingers={g.fingers} dur={dur * 1000:.0f}ms travel={g.travel:.0f}u "
+                      f"moved={g.moved} since_last={since * 1000:.0f}ms")
+        if self.dragging:
+            self.dragging = False
+            self.button(now, e.BTN_LEFT, False)
+            self.last_gesture_end = now
+            return
+        is_tap = not g.moved and dur <= self.tap_max and since > self.cooldown
+        if not is_tap:
+            self.last_gesture_end = now
+            return
+        if g.fingers == 1:
+            if g.maybe_drag:  # second tap of a pair
+                self.pending = None
+                self.click(now, e.BTN_LEFT, 1 if self.double else 2)
+            else:
+                self.pending = now
+        elif g.fingers in TAP_BUTTONS:
+            self.flush_pending(now)
+            self.click(now, TAP_BUTTONS[g.fingers])
+
+
+class Pipeline:
+    """Raw touchscreen events in; touchpad, button and touchscreen-clone events out."""
+
+    def __init__(self, cfg, ax, ay, pad, buttons, clone, log=None):
+        res = ax.resolution or 12  # units per mm
+        self.res = res
+        self.w = round(cfg["widthMm"] * res)
+        self.h = round(cfg["heightMm"] * res)
+        self.x0 = (ax.max + 1 - self.w) // 2
+        self.y0 = ay.max + 1 - round(cfg["bottomMm"] * res) - self.h
+        self.move_max = cfg.get("tapMaxMoveMm", 1.5) * res
+        self.pad, self.clone = pad, clone
+        self.clicker = Clicker(cfg, buttons, log)
+        self.slots = [Slot() for _ in range(MAX_SLOTS)]
+        self.released = []  # (slot, was_owned) lifted this frame
+        self.cur = 0
+        self.pad_tid = self.clone_tid = 0
+        self.pad_was = self.clone_was = 0
+
+    def inside(self, s):
+        return self.x0 <= s.x < self.x0 + self.w and self.y0 <= s.y < self.y0 + self.h
+
+    def handle(self, etype, code, value, now):
+        if etype == e.EV_ABS:
+            if code == e.ABS_MT_SLOT:
+                self.cur = value if value < MAX_SLOTS else -1
+                return
+            if self.cur < 0:
+                return
+            s = self.slots[self.cur]
+            if code == e.ABS_MT_TRACKING_ID:
+                if value < 0:
+                    if s.owned or s.fwd:
+                        self.released.append((self.cur, s.owned))
+                    s.owned = s.fwd = s.palm = False
+                else:
+                    s.new, s.palm = True, False
+            elif code == e.ABS_MT_POSITION_X:
+                s.x = value
+            elif code == e.ABS_MT_POSITION_Y:
+                s.y = value
+            elif code == e.ABS_MT_TOOL_TYPE:
+                s.palm = value == e.MT_TOOL_PALM
+        elif etype == e.EV_SYN and code == e.SYN_REPORT:
+            self.frame(now)
+
+    def frame(self, now):
+        pad, clone = self.pad, self.clone
+
+        # A contact belongs to the pad for its whole life iff it began inside.
+        for s in self.slots:
+            if s.new:
+                s.new = False
+                s.owned = not s.palm and self.inside(s)
+                s.fwd = not s.palm and not s.owned
+                s.start = True
+                s.sx, s.sy = s.x, s.y
+
+        for i, owned in self.released:
+            dev = pad if owned else clone
+            dev.write(e.EV_ABS, e.ABS_MT_SLOT, i)
+            dev.write(e.EV_ABS, e.ABS_MT_TRACKING_ID, -1)
+        self.released.clear()
+
+        pad_first = clone_first = None
+        pad_down = clone_down = 0
+        travel = 0.0
+        for i, s in enumerate(self.slots):
+            if s.palm and (s.owned or s.fwd):  # firmware reclassified it mid-touch
+                dev = pad if s.owned else clone
+                dev.write(e.EV_ABS, e.ABS_MT_SLOT, i)
+                dev.write(e.EV_ABS, e.ABS_MT_TRACKING_ID, -1)
+                s.owned = s.fwd = False
+                continue
+            if s.owned:
+                x = min(max(s.x - self.x0, 0), self.w - 1)
+                y = min(max(s.y - self.y0, 0), self.h - 1)
+                pad.write(e.EV_ABS, e.ABS_MT_SLOT, i)
+                if s.start:
+                    s.start = False
+                    self.pad_tid = (self.pad_tid + 1) & 0xFFFF
+                    pad.write(e.EV_ABS, e.ABS_MT_TRACKING_ID, self.pad_tid)
+                pad.write(e.EV_ABS, e.ABS_MT_POSITION_X, x)
+                pad.write(e.EV_ABS, e.ABS_MT_POSITION_Y, y)
+                pad_down += 1
+                travel = max(travel, ((s.x - s.sx) ** 2 + (s.y - s.sy) ** 2) ** 0.5)
+                if pad_first is None:
+                    pad_first = (x, y)
+            elif s.fwd:
+                clone.write(e.EV_ABS, e.ABS_MT_SLOT, i)
+                if s.start:
+                    s.start = False
+                    self.clone_tid = (self.clone_tid + 1) & 0xFFFF
+                    clone.write(e.EV_ABS, e.ABS_MT_TRACKING_ID, self.clone_tid)
+                clone.write(e.EV_ABS, e.ABS_MT_POSITION_X, s.x)
+                clone.write(e.EV_ABS, e.ABS_MT_POSITION_Y, s.y)
+                clone_down += 1
+                if clone_first is None:
+                    clone_first = (s.x, s.y)
+
+        if pad_down or self.pad_was:
+            if pad_first:
+                pad.write(e.EV_ABS, e.ABS_X, pad_first[0])
+                pad.write(e.EV_ABS, e.ABS_Y, pad_first[1])
+            pad.write(e.EV_KEY, e.BTN_TOUCH, 1 if pad_down else 0)
+            for n, tool in enumerate(TOOLS, 1):
+                pad.write(e.EV_KEY, tool, 1 if pad_down == n or (n == 4 and pad_down > 4) else 0)
+            pad.syn()
+
+        if clone_down or self.clone_was:
+            if clone_first:
+                clone.write(e.EV_ABS, e.ABS_X, clone_first[0])
+                clone.write(e.EV_ABS, e.ABS_Y, clone_first[1])
+            clone.write(e.EV_KEY, e.BTN_TOUCH, 1 if clone_down else 0)
+            clone.syn()
+
+        if pad_down and not self.pad_was:
+            self.clicker.begin(now)
+        if pad_down:
+            self.clicker.update(now, pad_down, travel, travel > self.move_max)
+        elif self.pad_was:
+            self.clicker.end(now)
+        self.pad_was, self.clone_was = pad_down, clone_down
+
+
+class RawLog:
+    def __init__(self):
+        os.makedirs(LOG_DIR, exist_ok=True)
+        self.path = os.path.join(LOG_DIR, "raw.log")
+        self.f = open(self.path, "a", buffering=1)
+
+    def write(self, line):
+        self.f.write(line + "\n")
+        if self.f.tell() > LOG_MAX:
+            self.f.close()
+            os.replace(self.path, self.path + ".1")
+            self.f = open(self.path, "a", buffering=1)
+
+
+def main():
+    with open(CONFIG) as f:
+        cfg = json.load(f)
+
+    src = find_touchscreen(cfg["touchscreen"])
+    ax = src.absinfo(e.ABS_MT_POSITION_X)
+    ay = src.absinfo(e.ABS_MT_POSITION_Y)
+    raw = RawLog()
+    raw.write(f"# start {time.time():.3f} config {json.dumps(cfg)} ax {ax.max} {ax.resolution} ay {ay.max}")
+
+    def log(now, msg):
+        raw.write(f"# {now:.6f} {msg}")
+
+    pipe = None
+
+    def pad_caps():
+        res = pipe.res
+        return {
+            e.EV_KEY: [e.BTN_LEFT, e.BTN_TOUCH, *TOOLS],
+            e.EV_ABS: [
+                (e.ABS_X, AbsInfo(0, 0, pipe.w - 1, 0, 0, res)),
+                (e.ABS_Y, AbsInfo(0, 0, pipe.h - 1, 0, 0, res)),
+                (e.ABS_MT_SLOT, AbsInfo(0, 0, MAX_SLOTS - 1, 0, 0, 0)),
+                (e.ABS_MT_POSITION_X, AbsInfo(0, 0, pipe.w - 1, 0, 0, res)),
+                (e.ABS_MT_POSITION_Y, AbsInfo(0, 0, pipe.h - 1, 0, 0, res)),
+                (e.ABS_MT_TRACKING_ID, AbsInfo(0, 0, 65535, 0, 0, 0)),
+            ],
+        }
+
+    pipe = Pipeline(cfg, ax, ay, None, None, None, log)
+    pipe.pad = UInput(pad_caps(), name="Zenbook Duo Screen Trackpad", bustype=e.BUS_VIRTUAL,
+                      input_props=[e.INPUT_PROP_POINTER, e.INPUT_PROP_BUTTONPAD])
+    pipe.clicker.ui = UInput({e.EV_KEY: [e.BTN_LEFT, e.BTN_RIGHT, e.BTN_MIDDLE], e.EV_REL: [e.REL_X, e.REL_Y]},
+                             name="Zenbook Duo Screen Trackpad Buttons", bustype=e.BUS_VIRTUAL)
+    pipe.clone = UInput(
+        {
+            e.EV_KEY: [e.BTN_TOUCH],
+            e.EV_ABS: [
+                (e.ABS_X, AbsInfo(0, 0, ax.max, 0, 0, ax.resolution)),
+                (e.ABS_Y, AbsInfo(0, 0, ay.max, 0, 0, ay.resolution)),
+                (e.ABS_MT_SLOT, AbsInfo(0, 0, MAX_SLOTS - 1, 0, 0, 0)),
+                (e.ABS_MT_POSITION_X, AbsInfo(0, 0, ax.max, 0, 0, ax.resolution)),
+                (e.ABS_MT_POSITION_Y, AbsInfo(0, 0, ay.max, 0, 0, ay.resolution)),
+                (e.ABS_MT_TRACKING_ID, AbsInfo(0, 0, 65535, 0, 0, 0)),
+            ],
+        },
+        name="Zenbook Duo Screen Trackpad Touchscreen",
+        bustype=e.BUS_VIRTUAL,
+        input_props=[e.INPUT_PROP_DIRECT],
+    )
+
+    src.grab()
+    print(f"region x={pipe.x0}..{pipe.x0 + pipe.w} y={pipe.y0}..{pipe.y0 + pipe.h} units "
+          f"({pipe.res}/mm) on {src.path} (grabbed)", flush=True)
+
+    while True:
+        ready, _, _ = select.select([src.fd], [], [], pipe.clicker.timeout(time.monotonic()))
+        if not ready:
+            continue
+        for ev in src.read():
+            now = time.monotonic()
+            raw.write(f"{now:.6f} {ev.type} {ev.code} {ev.value}")
+            pipe.handle(ev.type, ev.code, ev.value, now)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        pass
+    except PermissionError as err:
+        sys.exit(f"{err} (see README: Requirements)")

@@ -1,0 +1,13 @@
+{
+  "output": "eDP-2",
+  "touchscreen": "ELAN9009:00 04F3:4448",
+  "panelWidthMm": 306.25,
+  "widthMm": 120,
+  "heightMm": 70,
+  "bottomMm": 4,
+  "clickMode": "tap",
+  "tapMaxMs": 180,
+  "tapMaxMoveMm": 1.5,
+  "tapGapMs": 250,
+  "tapCooldownMs": 150
+}

@@ -1,0 +1,78 @@
+#!/usr/bin/python3 -I
+# Replay a screen-trackpadd raw log through the same Pipeline/Clicker with
+# fake output devices, printing every gesture and click it would produce.
+#
+#   screen-trackpad-replay [LOG] [--last SECONDS] [--set key=value ...]
+#
+# LOG defaults to $XDG_RUNTIME_DIR/zenbook-duo-screen-trackpad/raw.log.
+# --set overrides config.json values (e.g. --set tapMaxMs=140) to try tunings.
+
+import argparse
+import importlib.machinery
+import importlib.util
+import json
+import os
+
+here = os.path.dirname(os.path.realpath(__file__))
+loader = importlib.machinery.SourceFileLoader("stp", os.path.join(here, "screen-trackpadd"))
+spec = importlib.util.spec_from_loader("stp", loader)
+stp = importlib.util.module_from_spec(spec)
+loader.exec_module(stp)
+
+
+class Null:
+    def write(self, *a):
+        pass
+
+    def syn(self):
+        pass
+
+
+class Abs:
+    def __init__(self, mx, res):
+        self.max, self.resolution = mx, res
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("log", nargs="?", default=os.path.join(stp.LOG_DIR, "raw.log"))
+    ap.add_argument("--last", type=float, help="only the last N seconds")
+    ap.add_argument("--set", action="append", default=[], metavar="KEY=VALUE")
+    args = ap.parse_args()
+
+    with open(stp.CONFIG) as f:
+        cfg = json.load(f)
+    for kv in args.set:
+        k, v = kv.split("=", 1)
+        cfg[k] = json.loads(v) if v[:1] in "0123456789-[{\"tf" and v not in ("tap", "doubletap") else v
+
+    events = []
+    with open(args.log) as f:
+        for line in f:
+            if line.startswith("#"):
+                continue
+            t, typ, code, val = line.split()
+            events.append((float(t), int(typ), int(code), int(val)))
+    if not events:
+        print("no events")
+        return
+    if args.last:
+        cutoff = events[-1][0] - args.last
+        events = [ev for ev in events if ev[0] >= cutoff]
+
+    t0 = events[0][0]
+
+    def log(now, msg):
+        print(f"{now - t0:8.3f}s  {msg}")
+
+    pipe = stp.Pipeline(cfg, Abs(3675, 12), Abs(2254, 12), Null(), Null(), Null(), log)
+    c = pipe.clicker
+    for t, typ, code, val in events:
+        if c.pending is not None and c.gesture is None and c.pending + c.gap <= t:
+            c.timeout(c.pending + c.gap)  # fire at its real deadline, like select() would
+        pipe.handle(typ, code, val, t)
+    pipe.clicker.timeout(events[-1][0] + 10)
+
+
+if __name__ == "__main__":
+    main()

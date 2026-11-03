@@ -1,0 +1,267 @@
+#!/bin/bash
+# Toggle the on-screen trackpad carved out of the Zenbook Duo bottom OLED.
+#
+# The digitizer goes dead when eDP-2 is powered off, so the panel has to stay
+# lit for touch to work. Two flavours, picked by the bottom-OLED state:
+#
+#   on   (panel on)  -> pad drawn on the panel by Trackpad.qml.
+#   dark (panel off) -> eDP-2 enabled but parked far from every other monitor
+#                       (cursor/windows can't reach it) and covered by a black
+#                       overlay. Black OLED pixels emit no light.
+#                       Leaving dark disables eDP-2 again.
+#
+# The daemon (screen-trackpadd) runs as a systemd user service so it survives
+# shell restarts and comes back at login when left on. Hyprland settings it
+# needs live in a static stub under toggles/hypr, rewritten only when its
+# content changes. The bottom-OLED login stub reads our state file and parks
+# eDP-2 at DARK_POSITION instead of disabling it while we're dark.
+
+set -euo pipefail
+
+BIN_DIR=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/omarchy"
+STATE_FILE="$STATE_DIR/zenbook-duo-screen-trackpad"
+BOTTOM_STATE_FILE="$STATE_DIR/zenbook-duo-bottom-oled"
+STUB_FILE="$STATE_DIR/toggles/hypr/zenbook-duo-screen-trackpad.lua"
+UNIT=zenbook-duo-screen-trackpad.service
+UNIT_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/$UNIT"
+BOTTOM=eDP-2
+DARK_POSITION="-10000x0" # keep in sync with the bottom-oled stub
+CLAMSHELL_LOCK="${XDG_RUNTIME_DIR:-/tmp}/omarchy-monitor-clamshell.lock"
+MODELESS_LOCK="${XDG_RUNTIME_DIR:-/tmp}/omarchy-monitor-modeless.lock"
+
+usage() {
+  cat <<'EOF'
+Usage: zenbook-duo-screen-trackpad <toggle|on|dark|off|apply|status [--json]>
+
+  toggle   Off -> on (bottom panel on) or dark (bottom panel off); else off.
+  on       Pad drawn on the lit bottom panel.
+  dark     Bottom panel black and out of reach; the pad still works.
+  off      Stop the trackpad. A dark panel goes back to disabled.
+  apply    Re-apply the saved state (used at install and by the OLED CLI).
+  status   State, service, and prerequisite checks.
+EOF
+}
+
+read_state() {
+  if [[ -f $1 ]]; then
+    tr -d '[:space:]' <"$1"
+  else
+    echo off
+  fi
+}
+
+desired_state() { read_state "$STATE_FILE"; }
+
+write_state() {
+  mkdir -p "$STATE_DIR"
+  printf '%s\n' "$1" >"$STATE_FILE"
+}
+
+ensure_unit() {
+  local want
+  want=$(cat <<EOF
+[Unit]
+Description=Zenbook Duo bottom-screen trackpad
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+ExecStart=$BIN_DIR/screen-trackpadd
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=graphical-session.target
+EOF
+)
+  if [[ ! -f $UNIT_FILE || $(cat "$UNIT_FILE") != "$want" ]]; then
+    mkdir -p "$(dirname "$UNIT_FILE")"
+    printf '%s\n' "$want" >"$UNIT_FILE"
+    systemctl --user daemon-reload
+  fi
+}
+
+stub_lua() {
+  cat <<'EOF'
+-- squinto.zenbook-duo-bottom-oled screen trackpad — static stub, rewritten only on plugin update.
+-- Bind each touchscreen to its own panel. Unbound, Hyprland maps touch to the
+-- monitor under the cursor, so bottom-panel touches land on eDP-1.
+hl.device({ name = "elan9008:00-04f3:4447", output = "eDP-1" })
+hl.device({ name = "elan9009:00-04f3:4448", output = "eDP-2" })
+hl.device({ name = "zenbook-duo-screen-trackpad-touchscreen", output = "eDP-2" })
+-- screen-trackpadd does its own tap detection; libinput's misfires on pans.
+hl.device({ name = "zenbook-duo-screen-trackpad", tap_to_click = false })
+
+local state_path = (os.getenv("XDG_STATE_HOME") or (os.getenv("HOME") .. "/.local/state")) .. "/omarchy/zenbook-duo-screen-trackpad"
+local f = io.open(state_path, "r")
+local state = "off"
+if f then
+  state = (f:read("*l") or "off"):gsub("%s+", "")
+  f:close()
+end
+if state ~= "off" then
+  -- Pad touches are touchscreen touches too; they'd keep hiding the cursor.
+  hl.config({ cursor = { hide_on_touch = false } })
+end
+EOF
+}
+
+ensure_stub() {
+  if [[ -f $STUB_FILE && $(cat "$STUB_FILE") == "$(stub_lua)" ]]; then
+    return 0
+  fi
+  mkdir -p "$(dirname "$STUB_FILE")"
+  local tmp
+  tmp=$(mktemp "$STUB_FILE.XXXXXX")
+  stub_lua >"$tmp"
+  chmod 644 "$tmp"
+  mv -f "$tmp" "$STUB_FILE"
+}
+
+hypr_eval() {
+  local out
+  out=$(hyprctl eval "$1")
+  if [[ $out != "ok" ]]; then
+    echo "hyprctl eval failed: $1" >&2
+    printf '%s\n' "$out" >&2
+    exit 1
+  fi
+}
+
+set_bottom_monitor() {
+  local out
+  out=$(flock "$CLAMSHELL_LOCK" flock "$MODELESS_LOCK" hyprctl eval "$1")
+  if [[ $out != "ok" ]]; then
+    echo "hyprctl eval failed: $1" >&2
+    printf '%s\n' "$out" >&2
+    exit 1
+  fi
+}
+
+set_hide_on_touch() {
+  hypr_eval "hl.config({ cursor = { hide_on_touch = $1 } })"
+}
+
+park_bottom() {
+  set_bottom_monitor "hl.monitor({ output = \"$BOTTOM\", disabled = false, mode = \"preferred\", position = \"$DARK_POSITION\", scale = 2 })"
+}
+
+start_daemon() {
+  ensure_unit
+  ensure_stub
+  set_hide_on_touch false
+  systemctl --user enable "$UNIT" >/dev/null 2>&1
+  systemctl --user restart "$UNIT"
+}
+
+turn_on() {
+  if [[ $(desired_state) == "dark" ]]; then
+    turn_off
+  fi
+  write_state on
+  start_daemon
+}
+
+turn_dark() {
+  if [[ $(desired_state) == "on" ]]; then
+    turn_off
+  fi
+  write_state dark
+  park_bottom
+  start_daemon
+}
+
+turn_off() {
+  local was
+  was=$(desired_state)
+  write_state off
+  systemctl --user disable --now "$UNIT" >/dev/null 2>&1 || true
+  set_hide_on_touch true
+  if [[ $was == "dark" && $(read_state "$BOTTOM_STATE_FILE") != "on" ]]; then
+    set_bottom_monitor "hl.monitor({ output = \"$BOTTOM\", disabled = true })"
+  fi
+}
+
+apply_desired() {
+  ensure_stub
+  case "$(desired_state)" in
+    on) start_daemon ;;
+    dark)
+      if [[ $(read_state "$BOTTOM_STATE_FILE") == "on" ]]; then
+        write_state on
+      else
+        park_bottom
+      fi
+      start_daemon
+      ;;
+    *) systemctl --user disable --now "$UNIT" >/dev/null 2>&1 || true ;;
+  esac
+}
+
+# Prerequisite checks: name, ok(0/1), hint.
+check_prereqs() {
+  local touch
+  touch=$(jq -r .touchscreen "$BIN_DIR/../config.json")
+  /usr/bin/python3 -c 'import evdev' 2>/dev/null
+  printf 'python-evdev\t%s\tomarchy pkg add python-evdev\n' $(( $? == 0 ))
+  [[ -w /dev/uinput ]]
+  printf '/dev/uinput writable\t%s\tinstall udev/70-zenbook-duo-screen-trackpad.rules\n' $(( $? == 0 ))
+  /usr/bin/python3 -I - "$touch" <<'EOF' 2>/dev/null
+import sys, evdev
+for p in evdev.list_devices():
+    d = evdev.InputDevice(p)
+    if d.name == sys.argv[1]:
+        sys.exit(0)
+sys.exit(1)
+EOF
+  printf 'touchscreen readable\t%s\tinstall udev/70-zenbook-duo-screen-trackpad.rules\n' $(( $? == 0 ))
+}
+
+print_status() {
+  local active
+  active=$(systemctl --user is-active "$UNIT" 2>/dev/null || true)
+  set +e
+  local checks
+  checks=$(check_prereqs)
+  set -e
+  if [[ ${1:-} == "--json" ]]; then
+    jq -n --arg desired "$(desired_state)" --arg active "$active" --arg checks "$checks" '{
+      desired: $desired,
+      active: $active,
+      prerequisites: ($checks | split("\n") | map(select(length > 0) | split("\t") | {name: .[0], ok: (.[1] == "1"), fix: .[2]}))
+    }'
+  else
+    echo "desired: $(desired_state)"
+    echo "service: $active"
+    while IFS=$'\t' read -r name ok fix; do
+      if (( ok )); then
+        echo "ok:      $name"
+      else
+        echo "MISSING: $name ($fix)"
+      fi
+    done <<<"$checks"
+  fi
+}
+
+case "${1:-}" in
+  on) turn_on ;;
+  dark) turn_dark ;;
+  off) turn_off ;;
+  toggle)
+    if [[ $(desired_state) != "off" ]]; then
+      turn_off
+    elif [[ $(read_state "$BOTTOM_STATE_FILE") == "on" ]]; then
+      turn_on
+    else
+      turn_dark
+    fi
+    ;;
+  apply) apply_desired ;;
+  status) print_status "${2:-}" ;;
+  -h | --help | help) usage ;;
+  *)
+    usage >&2
+    exit 1
+    ;;
+esac

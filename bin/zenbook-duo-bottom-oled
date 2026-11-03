@@ -1,18 +1,23 @@
-#!/usr/bin/env bash
+#!/bin/bash
 # Toggle the ASUS Zenbook Duo bottom OLED (eDP-2) for Omarchy/Hyprland.
 #
 # Default: OFF. Turn it on with the bar button or CLI.
 # Folio/keyboard attach is NOT a hide path (stock Omarchy does not hide eDP-2).
 #
-# Live off/on: per-output DPMS (hl.dsp.dpms) + pin misc dpms-wake false so
-# typing does not relight eDP-2. Also disable the bottom ELAN touch/stylus.
-# Do NOT hyprctl reload. Do NOT
-# disabled=true live — that fires monitorremoved and Omarchy closes
-# omarchy-bar / omarchy-background (top bar flash).
-# First ON after login (stub left the panel disabled) still enables once.
+# Live off: disabled=true, so Hyprland treats eDP-2 as unplugged — its
+# workspaces/windows move to eDP-1 and nothing new spawns there. (DPMS-only
+# off left eDP-2 a live monitor that still received windows.) Accepted cost:
+# monitorremoved briefly recreates omarchy-bar / omarchy-background.
+# Also pin misc dpms-wake false (keyboard fix) and disable the bottom ELAN
+# touch/stylus. Do NOT hyprctl reload.
 #
 # Reboot persist: static stub lua reads STATE_FILE; desired!=on => disabled=true
-# (lag-correct, no extra composite). Never rewrite toggles/hypr on toggle.
+# (lag-correct, no extra composite). The stub is rewritten only when its
+# content changes (plugin update), never on toggle: a write makes Hyprland
+# reload its config.
+#
+# The screen trackpad (bin/zenbook-duo-screen-trackpad) needs eDP-2 lit even
+# when "off", so the stub parks the panel out of reach while it's dark.
 #
 # SKU labels: UX8406CA (Lunar Lake) vs UX8406MA vs generic.
 
@@ -26,12 +31,14 @@ LEGACY_DISABLE="$TOGGLE_DIR/zenbook-duo-bottom-oled-disable.lua"
 LEGACY_ENABLE="$TOGGLE_DIR/zenbook-duo-bottom-oled-enable.lua"
 CLAMSHELL_LOCK="${XDG_RUNTIME_DIR:-/tmp}/omarchy-monitor-clamshell.lock"
 MODELESS_LOCK="${XDG_RUNTIME_DIR:-/tmp}/omarchy-monitor-modeless.lock"
+BIN_DIR=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
+TRACKPAD="$BIN_DIR/zenbook-duo-screen-trackpad"
 
 usage() {
   cat <<'EOF'
 Usage: zenbook-duo-bottom-oled <off|on|toggle|status|apply>
 
-  off      Blank bottom OLED (live: DPMS). Default. Login persist: disabled.
+  off      Disable bottom OLED (acts unplugged). Default. Login persist: disabled.
   on       Light bottom OLED below the top panel.
   toggle   Flip desired state.
   status   Print SKU, outputs, desired/live/dpms.
@@ -118,7 +125,7 @@ write_state() {
 stub_lua() {
   cat <<EOF
 -- squinto.zenbook-duo-bottom-oled — static stub, do not rewrite on toggle.
--- Login: desired!=on => disabled (lag-correct). Live toggle is DPMS, not this file.
+-- Login: desired!=on => disabled (lag-correct). Live toggle uses hyprctl eval, not this file.
 local state_path = (os.getenv("XDG_STATE_HOME") or (os.getenv("HOME") .. "/.local/state")) .. "/omarchy/zenbook-duo-bottom-oled"
 local f = io.open(state_path, "r")
 local desired = "off"
@@ -126,8 +133,20 @@ if f then
   desired = (f:read("*l") or "off"):gsub("%s+", "")
   f:close()
 end
+-- Dark screen trackpad needs the panel lit (digitizer dies with it): park it
+-- out of reach instead of disabling. Position matches zenbook-duo-screen-trackpad.
+local tf = io.open(state_path:gsub("zenbook%-duo%-bottom%-oled$", "zenbook-duo-screen-trackpad"), "r")
+local trackpad = "off"
+if tf then
+  trackpad = (tf:read("*l") or "off"):gsub("%s+", "")
+  tf:close()
+end
 if desired ~= "on" then
-  hl.monitor({ output = "$BOTTOM", disabled = true })
+  if trackpad == "dark" then
+    hl.monitor({ output = "$BOTTOM", mode = "preferred", position = "-10000x0", scale = 2 })
+  else
+    hl.monitor({ output = "$BOTTOM", disabled = true })
+  end
 end
 EOF
 }
@@ -136,7 +155,7 @@ ensure_stub() {
   mkdir -p "$TOGGLE_DIR"
   umask 022
   rm -f "$LEGACY_DISABLE" "$LEGACY_ENABLE"
-  if [[ -f $STUB_FILE ]]; then
+  if [[ -f $STUB_FILE && $(cat "$STUB_FILE") == "$(stub_lua)" ]]; then
     return 0
   fi
   local tmp
@@ -244,24 +263,38 @@ set_bottom_digitizer() {
   done
 }
 
+trackpad_state() {
+  local f="$STATE_DIR/zenbook-duo-screen-trackpad"
+  if [[ -f $f ]]; then tr -d '[:space:]' <"$f"; else echo off; fi
+}
+
 disable_bottom() {
+  # A dark screen trackpad keeps eDP-2 lit; turning the panel off ends it.
+  [[ $(trackpad_state) == dark && -x $TRACKPAD ]] && "$TRACKPAD" off
   load_outputs
   write_state off
   ensure_stub
+  # Keep keypress/mouse DPMS wake off: with it on, typing glitches came back.
   set_dpms_wake false
   set_bottom_digitizer false
   if [[ $BOTTOM_DISABLED == true ]]; then
     return 0
   fi
-  live_dpms off false
+  apply_live_disabled "hl.monitor({ output = \"$BOTTOM\", disabled = true })" true
 }
 
 enable_bottom() {
+  local parked=false
   load_outputs
   write_state on
   ensure_stub
   set_dpms_wake true
-  if [[ $BOTTOM_DISABLED == true ]]; then
+  # Dark trackpad -> visible trackpad; eDP-2 is lit but parked out of reach.
+  if [[ $(trackpad_state) == dark && -x $TRACKPAD ]]; then
+    parked=true
+    "$TRACKPAD" on
+  fi
+  if [[ $BOTTOM_DISABLED == true || $parked == true ]]; then
     apply_live_disabled "hl.monitor({ output = \"$BOTTOM\", disabled = false, mode = \"preferred\", position = \"auto-down\", scale = $(scale_lua) })" false
     load_outputs
   fi
@@ -313,15 +346,18 @@ bottom:           $BOTTOM
 desired:          $desired
 live.disabled:    $BOTTOM_DISABLED
 live.dpms:        $BOTTOM_DPMS
-hide path:        live DPMS; login stub disables; no lua rewrite
+hide path:        live disable; login stub disables; no lua rewrite
 EOF
 }
 
 apply_desired() {
-  case "$(desired_state)" in
-    on) enable_bottom ;;
-    *) disable_bottom ;;
-  esac
+  # A dark trackpad keeps eDP-2 lit and parked; disable_bottom would end it.
+  if [[ $(desired_state) == "on" ]]; then
+    enable_bottom
+  elif [[ $(trackpad_state) != "dark" ]]; then
+    disable_bottom
+  fi
+  "$TRACKPAD" apply
 }
 
 sku_info

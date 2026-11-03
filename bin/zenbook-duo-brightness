@@ -1,0 +1,21 @@
+#!/bin/bash
+# Brightness keys for the Zenbook Duo: act on whichever panel is focused.
+#
+# omarchy-brightness-display always picks intel_backlight (eDP-1) via
+# omarchy-hw-display. When eDP-2 is focused, point omarchy-hw-display at a
+# directory holding only the bottom panel's backlight so the stock script
+# (steps, OSD, locking) drives that one instead.
+
+set -euo pipefail
+
+BOTTOM_OUTPUT=eDP-2
+BOTTOM_BACKLIGHT=card1-eDP-2-backlight
+
+if [[ $(omarchy-hyprland-monitor-focused 2>/dev/null) == "$BOTTOM_OUTPUT" ]]; then
+  dir="${XDG_RUNTIME_DIR:-/tmp}/zenbook-duo-bottom-backlight"
+  mkdir -p "$dir"
+  ln -sfn "/sys/class/backlight/$BOTTOM_BACKLIGHT" "$dir/$BOTTOM_BACKLIGHT"
+  export OMARCHY_BACKLIGHT_PATH="$dir"
+fi
+
+exec omarchy-brightness-display "$@"

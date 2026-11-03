@@ -2,19 +2,21 @@
   "schemaVersion": 1,
   "id": "squinto.zenbook-duo-bottom-oled",
   "name": "Zenbook Duo bottom OLED",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "author": "squinto",
   "license": "MIT",
-  "description": "UX8406CA (not UX8406MA) bottom OLED (eDP-2) stays off by default. A bar button turns it on. Does not use folio/keyboard attach as a hide path.",
+  "description": "ASUS Zenbook Duo UX8406CA bottom OLED (eDP-2): an on/off toggle (default off) and a screen trackpad carved out of the panel, usable with the panel lit or dark.",
   "kinds": [
-    "bar-widget"
+    "bar-widget",
+    "service"
   ],
   "entryPoints": {
-    "barWidget": "BarWidget.qml"
+    "barWidget": "BarWidget.qml",
+    "service": "Trackpad.qml"
   },
   "barWidget": {
     "displayName": "Bottom OLED",
-    "description": "Toggle the Zenbook Duo bottom OLED (eDP-2). Default off. Enable with --after omarchy.tray to sit in the right cluster after the system tray.",
+    "description": "Two buttons: toggle the Zenbook Duo bottom OLED (eDP-2, default off) and toggle the screen trackpad. Enable with --after omarchy.tray to sit in the right cluster after the system tray.",
     "category": "System",
     "allowMultiple": false,
     "defaultSection": "right"
