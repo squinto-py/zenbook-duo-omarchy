@@ -5,7 +5,7 @@
   "version": "1.1.0",
   "author": "squinto",
   "license": "MIT",
-  "description": "ASUS Zenbook Duo UX8406CA bottom OLED (eDP-2): an on/off toggle (default off) and a screen trackpad carved out of the panel, usable with the panel lit or dark.",
+  "description": "ASUS Zenbook Duo UX8406CA bottom OLED (eDP-2): an on/off toggle (default off) and a screen trackpad in a bottom-centre rectangle of the panel, usable with the panel lit or dark.",
   "kinds": [
     "bar-widget",
     "service"

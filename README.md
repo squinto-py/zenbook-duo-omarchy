@@ -21,7 +21,7 @@ The panel toggle needs nothing beyond Omarchy. The screen trackpad needs two thi
    omarchy pkg add python-evdev
    ```
 
-2. **Access to the bottom touchscreen and to `/dev/uinput`.** The rule in `udev/` grants both to the logged-in seat user (`uaccess`), the same mechanism Steam and Solaar use. Nothing becomes world-writable.
+2. **Access to the bottom touchscreen and to `/dev/uinput`.** The rule in `udev/` grants both to the logged-in seat user (`uaccess`), the same mechanism Steam and Solaar use.
 
    ```
    cd ~/.config/omarchy/plugins/squinto.zenbook-duo-bottom-oled
@@ -68,12 +68,12 @@ The two toggles are independent and combine into four modes:
 | off | on | **Dark trackpad.** The panel is black and out of reach of the cursor and windows; the pad still works. |
 | off | off | Panel disabled. |
 
-The touch sensor loses power with the panel, so the dark trackpad keeps the panel powered and shows only black, which an OLED renders with its pixels off. It uses more power than a disabled panel and much less than a lit one.
+The touch sensor loses power with the panel, so the dark trackpad keeps the panel powered and shows only black, which an OLED renders with its pixels off. A disabled panel still uses less power.
 
 Gestures on the pad:
 
 - One-finger move: pointer
-- Tap: left click (fires about a quarter second late, while it waits for a second tap)
+- Tap: left click, 250 ms late (`tapGapMs`) while it waits for a second tap
 - Two quick taps: double click
 - Tap, then touch and move: drag
 - Two-finger tap: right click. Three-finger tap: middle click.
@@ -136,12 +136,12 @@ bin/screen-trackpad-replay --last 10 --set tapMaxMs=140 --set tapCooldownMs=250
 ## How the trackpad works
 
 - `bin/screen-trackpadd` runs as the `zenbook-duo-screen-trackpad` systemd user service.
-- **Exclusive grab:** it grabs the bottom touchscreen, so no raw touch reaches the compositor.
-- **Pad touches:** contacts that start inside the pad are replayed onto a virtual multitouch touchpad. libinput handles motion, acceleration and scrolling.
-- **Taps:** detected by the daemon and sent through a separate virtual button device. libinput's own tap-to-click misfires on this digitizer, which drops contacts mid-pan and staggers fingers at the start and end of a scroll.
-- **Touches outside the pad:** go to a virtual touchscreen bound to `eDP-2`, so the rest of the panel stays a touchscreen.
-- **Drawing:** `Trackpad.qml`, a shell service, draws the pad outline, or the black cover in dark mode.
-- **Hyprland settings** live in a stub under `~/.local/state/omarchy/toggles/hypr/`, rewritten only when the plugin's copy changes:
+- It grabs the bottom touchscreen, so no raw touch reaches the compositor.
+- Contacts that start inside the pad are replayed onto a virtual multitouch touchpad. libinput handles motion, acceleration and scrolling.
+- The daemon detects taps itself and sends clicks through a separate virtual button device. libinput's own tap-to-click misfires on this digitizer, which drops contacts mid-pan and staggers fingers at the start and end of a scroll.
+- Touches outside the pad go to a virtual touchscreen bound to `eDP-2`, so the rest of the panel stays a touchscreen.
+- `Trackpad.qml`, a shell service, draws the pad outline, or the black cover in dark mode.
+- Hyprland settings live in a stub under `~/.local/state/omarchy/toggles/hypr/`, rewritten only when the plugin's copy changes:
   - each touchscreen is bound to its own panel; unbound, Hyprland sends touches to the monitor under the cursor
   - tap-to-click is off for the virtual pad
   - while the trackpad is on, the cursor isn't hidden on touch
