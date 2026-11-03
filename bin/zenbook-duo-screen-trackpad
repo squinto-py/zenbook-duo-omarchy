@@ -156,17 +156,16 @@ start_daemon() {
 }
 
 turn_on() {
-  if [[ $(desired_state) == "dark" ]]; then
-    turn_off
+  # A visible pad needs the panel on; with it off, "on" means dark.
+  if [[ $(read_state "$BOTTOM_STATE_FILE") != "on" ]]; then
+    turn_dark
+    return
   fi
   write_state on
   start_daemon
 }
 
 turn_dark() {
-  if [[ $(desired_state) == "on" ]]; then
-    turn_off
-  fi
   write_state dark
   park_bottom
   start_daemon

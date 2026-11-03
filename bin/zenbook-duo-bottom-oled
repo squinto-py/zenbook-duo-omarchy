@@ -269,8 +269,19 @@ trackpad_state() {
 }
 
 disable_bottom() {
-  # A dark screen trackpad keeps eDP-2 lit; turning the panel off ends it.
-  [[ $(trackpad_state) == dark && -x $TRACKPAD ]] && "$TRACKPAD" off
+  case "$(trackpad_state)" in
+    # An explicit off ends a dark trackpad, which keeps eDP-2 lit.
+    dark) "$TRACKPAD" off ;;
+    # Panel off with the pad showing: keep the pad, go dark.
+    on)
+      load_outputs
+      write_state off
+      ensure_stub
+      set_dpms_wake false
+      "$TRACKPAD" dark
+      return 0
+      ;;
+  esac
   load_outputs
   write_state off
   ensure_stub
